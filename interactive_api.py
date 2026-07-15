@@ -10,6 +10,8 @@ from dotenv import dotenv_values, load_dotenv
 BASE_DIR = Path(__file__).resolve().parent
 SITE_CODES_FILE = BASE_DIR / "site_codes.env"
 OUTPUT_DIR = BASE_DIR / "outputs"
+UPLOAD_CONFIG_FILE = BASE_DIR / "upload_config.json"
+REQUEST_TIMEOUT = 30
 
 load_dotenv(BASE_DIR / ".env")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -59,7 +61,7 @@ def get_devices(site_id):
             "limit": 300,
             "page": page
         }
-        response = requests.get(url, headers=headers, params=params)
+        response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         switches = response.json()
         if not switches:
@@ -71,7 +73,7 @@ def get_devices(site_id):
 def get_device_info(site_id, device_id):
     url = f"{API_URL.rstrip('/')}/api/v1/sites/{site_id}/devices/{device_id}"
     headers = {"Authorization": f"Token {API_KEY}"}
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()
 
@@ -220,17 +222,17 @@ def main():
                     print(f"Error fetching or saving device config: {e}")
                     continue
 
-                               # Step 4: Optionally upload config
+                # Step 4: Optionally upload config
                 upload = input("Would you like to upload 'upload_config.json' to this device? (y/n): ").strip().lower()
                 if upload == 'y':
                     try:
-                        if not os.path.exists('upload_config.json'):
+                        if not UPLOAD_CONFIG_FILE.exists():
                             print("❌ File 'upload_config.json' does not exist.")
                             continue
-                        if os.path.getsize('upload_config.json') == 0:
+                        if UPLOAD_CONFIG_FILE.stat().st_size == 0:
                             print("❌ File 'upload_config.json' is empty.")
                             continue
-                        with open('upload_config.json', 'r', encoding='utf-8') as f:
+                        with open(UPLOAD_CONFIG_FILE, 'r', encoding='utf-8') as f:
                             try:
                                 upload_data = json.load(f)
                             except json.JSONDecodeError as jde:
@@ -245,7 +247,7 @@ def main():
                             "Authorization": f"Token {API_KEY}",
                             "Content-Type": "application/json"
                         }
-                        put_response = requests.put(put_url, headers=headers, data=json.dumps(upload_data))
+                        put_response = requests.put(put_url, headers=headers, data=json.dumps(upload_data), timeout=REQUEST_TIMEOUT)
                         print(f"\n➡️  PUT data sent to device ID: {device_id} at endpoint: {put_url}")
                         if put_response.ok:
                             print(f"✅ PUT succeeded! Status code: {put_response.status_code}")
