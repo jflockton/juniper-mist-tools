@@ -1,0 +1,252 @@
+# Mist Switch Configuration Utility
+
+This project provides two Python scripts for working with Juniper Mist switch configurations:
+
+- `get_site_ids.py` retrieves all sites in a Mist organisation and generates `site_codes.env`.
+- `interactive_api.py` lets an operator select a site and switch, download switch configuration, export configurations for every switch, or optionally upload JSON configuration to one switch.
+
+There is no compilation or packaging step. Set up Python, install the dependencies, configure the Mist credentials, and run the scripts from the project directory.
+
+## Index
+
+| Section | Description |
+|---|---|
+| [Prerequisites](#prerequisites) | Required Python version, Mist access, token, and organisation information |
+| [Files to copy](#files-to-copy) | Files required when moving the utility to another environment |
+| [1. Create a virtual environment](#1-create-a-virtual-environment) | Create `.venv` and install the Python packages |
+| [2. Create `.env`](#2-create-env) | Configure the API URL, API token, and organisation ID |
+| [Obtain the Mist API values](#obtain-the-mist-api-values) | Instructions for `MIST_API_KEY`, `ORG_ID`, `ACCOUNT_ID`, and `API_URL` |
+| [Official Juniper reference URLs](#official-juniper-reference-urls) | Direct links to the relevant Juniper Mist documentation |
+| [3. Generate the site-code file](#3-generate-the-site-code-file) | Create or refresh `site_codes.env` |
+| [4. Run the interactive utility](#4-run-the-interactive-utility) | Select sites and switches or export all switch configurations |
+| [Optional configuration upload](#optional-configuration-upload) | Safely use `upload_config.json` |
+| [Refreshing sites](#refreshing-sites) | Update local site IDs after Mist changes |
+| [VS Code](#vs-code) | Select the virtual environment and handle `.env` integration |
+| [Troubleshooting](#troubleshooting) | Resolve common setup, API, and connectivity problems |
+| [Security and generated files](#security-and-generated-files) | Protect tokens and downloaded configurations |
+
+## Prerequisites
+
+- Python 3.10 or newer (tested with Python 3.13)
+- Network access to the correct Mist cloud API
+- A Mist API token with access to the required organisation and sites
+- The Mist organisation ID
+
+The API URL depends on the Mist cloud hosting the organisation. For example, an EMEA organisation might use `https://api.eu.mist.com`. Use the URL appropriate for the target environment.
+
+## Files to copy
+
+Copy these files into a new project directory:
+
+```text
+get_site_ids.py
+interactive_api.py
+.gitignore
+upload_config.json       # Optional; only needed for configuration uploads
+```
+
+Do not copy `.venv`, `.env`, `site_codes.env`, `outputs`, or `__pycache__` between environments. They should be created locally.
+
+## 1. Create a virtual environment
+
+Open PowerShell in the project directory:
+
+```powershell
+py -3 -m venv .venv
+```
+
+If the Python launcher is unavailable, use:
+
+```powershell
+python -m venv .venv
+```
+
+Install the required packages using the virtual environment directly:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install requests python-dotenv
+```
+
+Using the interpreter directly avoids PowerShell activation-policy problems. To activate the environment instead, run:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+On Linux or macOS, use `.venv/bin/python` in place of `.\.venv\Scripts\python.exe`.
+
+## 2. Create `.env`
+
+Create a file named `.env` in the same directory as the Python scripts:
+
+```env
+API_URL=https://api.eu.mist.com
+MIST_API_KEY=replace-with-api-token
+ORG_ID=replace-with-organisation-id
+```
+
+`get_site_ids.py` requires all three values. `interactive_api.py` requires `API_URL` and `MIST_API_KEY`; it reads site IDs from `site_codes.env` rather than directly from `.env`.
+
+### Obtain the Mist API values
+
+#### `MIST_API_KEY`
+
+Juniper calls the API key an **API token**. For a shared application, an organisation token is normally more suitable than a token tied to one user:
+
+1. Sign in to the Juniper Mist portal.
+2. Select **Organization > Admin > Settings**.
+3. Find **API Token** and select **Create Token**.
+4. Choose the minimum access level the utility needs, then generate the token.
+5. Copy the complete key immediately and store it securely. Mist does not display the complete key again after creation.
+6. Put the key itself in `MIST_API_KEY`; do not include the word `Token`, quotation marks, or other prefixes.
+
+Juniper also documents user-token creation through **My Account**, which is useful for scripts operated by one person. See [Create API Tokens — Juniper Mist documentation](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/task/create-token-for-rest-api.html).
+
+#### `ORG_ID`
+
+1. In the Mist portal, select **Organization > Admin > Settings**.
+2. Find **Organization ID** near the top of the page.
+3. Use the copy button and put that UUID in `ORG_ID`.
+
+The ID is generated by Mist and cannot be changed. See [Find Your Organization ID — Juniper Mist documentation](https://www.juniper.net/documentation/us/en/software/mist/mist-management/topics/task/find-org-id.html).
+
+If the token can access several organisations and you are unsure which ID to use, Juniper documents using **API > Self > Account > Get Self** in the API Reference to inspect the organisations and sites available to the authenticated token. See [Additional RESTful API Documentation — Juniper Mist](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/addition-restful-documentation.html).
+
+#### `ACCOUNT_ID`
+
+`ACCOUNT_ID` is **not required or read by either script in this project**. It appeared in an older environment template, but the current Mist endpoints used here require an organisation ID, site IDs, and device IDs—not a general `ACCOUNT_ID`. It can be omitted from `.env`.
+
+If another Mist integration asks for account or privilege information, use the documented `GET /api/v1/self` operation to inspect the authenticated identity and its accessible scopes. In the API Reference, open **API > Self > Account > Get Self**, configure the correct Mist region, authenticate with the token, and select **Try It Out**. See [Use the Mist API Reference for API Testing — Juniper Mist](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/task/use-mist-api-reference.html).
+
+For an MSP integration, check whether the other application actually means the Mist **MSP ID** (`msp_id`), which is a different scope identifier and should not be assumed to be `ACCOUNT_ID`.
+
+#### `API_URL`
+
+Use the API endpoint for the Mist cloud region containing the organisation. The portal hostname normally indicates the matching region; for example, `manage.eu.mist.com` corresponds to `https://api.eu.mist.com`. Check the current mapping in [API Endpoints and Global Regions — Juniper Mist](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/topic-map/api-endpoint-url-global-regions.html).
+
+### Official Juniper reference URLs
+
+- Create API tokens: <https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/task/create-token-for-rest-api.html>
+- Find the organisation ID: <https://www.juniper.net/documentation/us/en/software/mist/mist-management/topics/task/find-org-id.html>
+- Mist API `GET /api/v1/self` reference: <https://www.juniper.net/documentation/us/en/software/mist/api/http/api/self/account/get-self>
+- Use the Mist API Reference for testing: <https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/task/use-mist-api-reference.html>
+- Mist API endpoints and global regions: <https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/topic-map/api-endpoint-url-global-regions.html>
+
+Do not add quotes unless they are genuinely part of a value. Do not commit `.env` because it contains the API token.
+
+## 3. Generate the site-code file
+
+Run:
+
+```powershell
+.\.venv\Scripts\python.exe .\get_site_ids.py
+```
+
+The script requests every site from the configured Mist organisation and creates `site_codes.env`. Entries use this format:
+
+```env
+site_Manchester=00000000-0000-0000-0000-000000000000
+site_Milton_Keynes=00000000-0000-0000-0000-000000000000
+```
+
+Spaces and punctuation in Mist site names are converted to underscores. Site-name casing is preserved. If two names produce the same key, a numeric suffix is added.
+
+Running the script again replaces `site_codes.env` with the current site list. Regenerate it whenever sites are added, removed, or renamed in Mist.
+
+## 4. Run the interactive utility
+
+Run the utility from the project directory:
+
+```powershell
+.\.venv\Scripts\python.exe .\interactive_api.py
+```
+
+The main menu provides these options:
+
+- Enter a site number to list its switches.
+- Enter `A` to download configurations for every switch in every listed site.
+- Enter `0` to exit.
+
+After selecting a switch, its configuration is written as JSON to:
+
+```text
+outputs/<switch-name>.log
+```
+
+The `outputs` directory is created automatically. Invalid filename characters are replaced, and the device ID is added when duplicate switch names would otherwise produce the same filename.
+
+## Optional configuration upload
+
+After downloading one switch configuration, the utility asks whether to upload `upload_config.json` to that switch.
+
+To use this feature:
+
+1. Place `upload_config.json` in the project directory.
+2. Ensure it contains valid JSON whose top-level value is an object.
+3. Select the intended site and switch carefully.
+4. Answer `y` only after reviewing the file and selected device.
+
+Uploading performs a Mist API `PUT` against the selected switch and changes its configuration. Take a current configuration export first and test changes through the normal change-control process. Leave `upload_config.json` empty or answer `n` when only collecting configurations.
+
+## Refreshing sites
+
+When the Mist site list changes, regenerate `site_codes.env` before opening the interactive utility:
+
+```powershell
+.\.venv\Scripts\python.exe .\get_site_ids.py
+```
+
+The interactive utility does not query the organisation site-list endpoint; it uses the contents of the generated file.
+
+## VS Code
+
+Select the project virtual environment as the Python interpreter:
+
+```text
+<project directory>\.venv\Scripts\python.exe
+```
+
+The scripts load `.env` themselves with `python-dotenv`. VS Code terminal environment injection is therefore optional and can remain disabled.
+
+## Troubleshooting
+
+### Missing required values
+
+```text
+Missing required value(s) in .env
+```
+
+Confirm `.env` is alongside the scripts and contains non-empty `API_URL`, `MIST_API_KEY`, and, when generating site codes, `ORG_ID` values.
+
+### `site_codes.env` was not found
+
+Run `get_site_ids.py` successfully before starting `interactive_api.py`.
+
+### HTTP 401 or 403
+
+Confirm that the API token is valid and has access to the configured organisation and sites. Also confirm that `API_URL` points to the Mist cloud containing that organisation.
+
+### A site is missing or has an unexpected name
+
+Run `get_site_ids.py` again. The generated keys reflect the current site names returned by Mist, not historical aliases stored elsewhere.
+
+### Connection or timeout errors
+
+Confirm internet access, DNS resolution, proxy/firewall rules, and connectivity to the configured Mist API URL.
+
+### PowerShell blocks virtual-environment activation
+
+Activation is not required. Run scripts using `.\.venv\Scripts\python.exe` as shown above.
+
+## Security and generated files
+
+The following files and directories should remain excluded from Git:
+
+```text
+.env
+site_codes.env
+outputs/
+__pycache__/
+```
+
+Treat downloaded switch configurations as sensitive operational data. Store, share, and delete them according to the organisation's security requirements.

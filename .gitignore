@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.bak
+outputs/
+backups/
+# Internal Securitas SOC VLAN map — never commit (both filename cases)
+soc-vlans.json
+SOC-VLANS.json
+site_codes.env
