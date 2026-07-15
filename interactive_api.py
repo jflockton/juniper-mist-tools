@@ -160,8 +160,8 @@ def export_all_switch_configs(sites):
 # no client IP/MAC - do not use it for this.
 
 WIRED_CLIENT_COLUMNS = [
-    "client_mac", "ip", "device_name", "port_id", "fpc",
-    "vlan", "manufacture", "dhcp_hostname", "last_seen_utc",
+    "client_mac", "ip", "switch_name", "port_id", "vlan", "manufacture",
+    "dhcp_hostname", "last_seen_utc",
 ]
 
 
@@ -224,7 +224,7 @@ def get_wired_clients(site_id, start_epoch, end_epoch):
     return clients
 
 
-def wired_client_to_row(client, device_name):
+def wired_client_to_row(client, switch_name):
     """Map one wired_clients/search record onto the CSV columns."""
     port_id = client.get("last_port_id") or _first(client.get("port_id"))
     ip = client.get("last_ip") or _first(client.get("ip"))
@@ -239,9 +239,8 @@ def wired_client_to_row(client, device_name):
     return {
         "client_mac": client.get("mac", ""),
         "ip": ip or "",
-        "device_name": device_name,
+        "switch_name": switch_name,
         "port_id": port_id or "",
-        "fpc": derive_fpc(port_id),
         "vlan": "" if vlan is None else vlan,
         "manufacture": client.get("manufacture", ""),
         "dhcp_hostname": hostname or "",
@@ -323,7 +322,7 @@ def export_wired_clients_for_device(site, device):
         for client in all_clients
         if _normalise_mac(client.get("last_device_mac")) == device_mac
     ]
-    rows.sort(key=lambda row: (row["fpc"], row["port_id"], row["client_mac"]))
+    rows.sort(key=lambda row: (derive_fpc(row["port_id"]), row["port_id"], row["client_mac"]))
 
     filepath = write_wired_clients_csv(site_name, device_name, rows)
     if rows:

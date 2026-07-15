@@ -204,12 +204,12 @@ Option `2` pulls every wired client seen on the selected switch/stack and writes
 outputs/<site>_<switch>_wired_clients_<YYYYMMDD-HHMM>.csv
 ```
 
-You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, device_name, port_id, fpc, vlan, manufacture, dhcp_hostname, last_seen_utc`.
+You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, switch_name, port_id, vlan, manufacture, dhcp_hostname, last_seen_utc`.
 
 Notes:
 
 - The client IP is only present where Mist has learned one (DHCP snooping or the switch ARP table), so the `ip` column is often blank — this is expected, not an error.
-- `fpc` is derived from the port ID (`ge-1/0/12` → `1`) so stack members are visible; aggregated interfaces (for example `ae0`) have no FPC.
+- Rows are ordered by switch port (stack members grouped together).
 - The export mirrors the portal's Wired Clients page (data comes from the Mist `wired_clients/search` endpoint).
 
 ## Refreshing sites
