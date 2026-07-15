@@ -204,7 +204,7 @@ Option `2` pulls every wired client seen on the selected switch/stack and writes
 outputs/<site>_<switch>_wired_clients_<YYYYMMDD-HHMM>.csv
 ```
 
-You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, device_mac, device_name, port_id, fpc, vlan, manufacture, dhcp_hostname, last_seen_utc`.
+You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, device_name, port_id, fpc, vlan, manufacture, dhcp_hostname, last_seen_utc`.
 
 Notes:
 

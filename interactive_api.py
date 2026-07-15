@@ -160,7 +160,7 @@ def export_all_switch_configs(sites):
 # no client IP/MAC - do not use it for this.
 
 WIRED_CLIENT_COLUMNS = [
-    "client_mac", "ip", "device_mac", "device_name", "port_id", "fpc",
+    "client_mac", "ip", "device_name", "port_id", "fpc",
     "vlan", "manufacture", "dhcp_hostname", "last_seen_utc",
 ]
 
@@ -239,7 +239,6 @@ def wired_client_to_row(client, device_name):
     return {
         "client_mac": client.get("mac", ""),
         "ip": ip or "",
-        "device_mac": client.get("last_device_mac", ""),
         "device_name": device_name,
         "port_id": port_id or "",
         "fpc": derive_fpc(port_id),
