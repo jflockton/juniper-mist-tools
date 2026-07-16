@@ -1,9 +1,10 @@
 # Mist Switch Configuration Utility
 
-This project provides two Python scripts for working with Juniper Mist switch configurations:
+This project provides a small Python utility for working with Juniper Mist switch configurations and wired-client inventory:
 
 - `get_site_ids.py` retrieves all sites in a Mist organisation and generates `site_codes.env`.
-- `interactive_api.py` lets an operator select a site and switch, download switch configuration, export configurations for every switch, or optionally upload JSON configuration to one switch.
+- `interactive_api.py` exports configurations for all site devices, provides read-only switch tools, creates source VLAN datasets, compares them with a selected destination, and previews or applies reviewed JSON configuration.
+- `mist_client.py` provides shared authentication, timeout, pagination-URL safety, and JSON handling for both scripts.
 
 There is no compilation or packaging step. Set up Python, install the dependencies, configure the Mist credentials, and run the scripts from the project directory.
 
@@ -15,11 +16,14 @@ There is no compilation or packaging step. Set up Python, install the dependenci
 | [Files to copy](#files-to-copy) | Files required when moving the utility to another environment |
 | [1. Create a virtual environment](#1-create-a-virtual-environment) | Create `.venv` and install the Python packages |
 | [2. Create `.env`](#2-create-env) | Configure the API URL, API token, and organisation ID |
-| [Obtain the Mist API values](#obtain-the-mist-api-values) | Instructions for `MIST_API_KEY`, `ORG_ID`, `ACCOUNT_ID`, and `API_URL` |
+| [Obtain the Mist API values](#obtain-the-mist-api-values) | Instructions for `MIST_API_KEY`, `ORG_ID`, and `API_URL` |
 | [Official Juniper reference URLs](#official-juniper-reference-urls) | Direct links to the relevant Juniper Mist documentation |
 | [3. Generate the site-code file](#3-generate-the-site-code-file) | Create or refresh `site_codes.env` |
-| [4. Run the interactive utility](#4-run-the-interactive-utility) | Select sites and switches or export all switch configurations |
-| [Optional configuration upload](#optional-configuration-upload) | Safely use `upload_config.json` |
+| [4. Run the interactive utility](#4-run-the-interactive-utility) | Select switches or export configurations for all site devices |
+| [Optional configuration upload](#optional-configuration-upload) | Preview, back up, apply, and verify `upload_config.json` |
+| [Export wired clients to CSV](#export-wired-clients-to-csv) | Export the selected switch's wired-client inventory |
+| [Copy missing VLANs](#copy-missing-vlans) | Safely add absent source VLANs to another switch |
+| [Run the tests](#run-the-tests) | Run the offline mocked unit-test suite |
 | [Refreshing sites](#refreshing-sites) | Update local site IDs after Mist changes |
 | [VS Code](#vs-code) | Select the virtual environment and handle `.env` integration |
 | [Troubleshooting](#troubleshooting) | Resolve common setup, API, and connectivity problems |
@@ -41,11 +45,16 @@ Copy these files into a new project directory:
 ```text
 get_site_ids.py
 interactive_api.py
+mist_client.py
+vlan_copy.py
+requirements.txt
 .gitignore
-upload_config.json       # Optional; only needed for configuration uploads
+.env.example               # Safe template for local Mist settings
+upload_config.example.json  # Safe template for optional configuration uploads
 ```
 
-Do not copy `.venv`, `.env`, `site_codes.env`, `outputs`, or `__pycache__` between environments. They should be created locally.
+Do not copy `.venv`, `.env`, `site_codes.env`, `outputs`, `backups`, or
+`__pycache__` between environments. They should be created locally.
 
 ## 1. Create a virtual environment
 
@@ -64,7 +73,7 @@ python -m venv .venv
 Install the required packages using the virtual environment directly:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install requests python-dotenv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Using the interpreter directly avoids PowerShell activation-policy problems. To activate the environment instead, run:
@@ -77,7 +86,14 @@ On Linux or macOS, use `.venv/bin/python` in place of `.\.venv\Scripts\python.ex
 
 ## 2. Create `.env`
 
-Create a file named `.env` in the same directory as the Python scripts:
+Copy `.env.example` to `.env` in the same directory as the Python scripts, then
+replace its placeholder values:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+The template contains:
 
 ```env
 API_URL=https://api.eu.mist.com
@@ -85,7 +101,13 @@ MIST_API_KEY=replace-with-api-token
 ORG_ID=replace-with-organisation-id
 ```
 
-`get_site_ids.py` requires all three values. `interactive_api.py` requires `API_URL` and `MIST_API_KEY`; it reads site IDs from `site_codes.env` rather than directly from `.env`.
+`get_site_ids.py` requires the first three values. `interactive_api.py` uses `ORG_ID`
+for its validation and site-catalogue refresh actions.
+
+The `.env` file is authoritative and is read again for every top-level API action.
+An older value inherited from VS Code or the process environment cannot override a
+changed file value. A failed validation also clears any previously valid in-memory
+API client.
 
 ### Obtain the Mist API values
 
@@ -111,14 +133,6 @@ Juniper also documents user-token creation through **My Account**, which is usef
 The ID is generated by Mist and cannot be changed. See [Find Your Organization ID — Juniper Mist documentation](https://www.juniper.net/documentation/us/en/software/mist/mist-management/topics/task/find-org-id.html).
 
 If the token can access several organisations and you are unsure which ID to use, Juniper documents using **API > Self > Account > Get Self** in the API Reference to inspect the organisations and sites available to the authenticated token. See [Additional RESTful API Documentation — Juniper Mist](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/addition-restful-documentation.html).
-
-#### `ACCOUNT_ID`
-
-`ACCOUNT_ID` is **not required or read by either script in this project**. It appeared in an older environment template, but the current Mist endpoints used here require an organisation ID, site IDs, and device IDs—not a general `ACCOUNT_ID`. It can be omitted from `.env`.
-
-If another Mist integration asks for account or privilege information, use the documented `GET /api/v1/self` operation to inspect the authenticated identity and its accessible scopes. In the API Reference, open **API > Self > Account > Get Self**, configure the correct Mist region, authenticate with the token, and select **Try It Out**. See [Use the Mist API Reference for API Testing — Juniper Mist](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/task/use-mist-api-reference.html).
-
-For an MSP integration, check whether the other application actually means the Mist **MSP ID** (`msp_id`), which is a different scope identifier and should not be assumed to be `ACCOUNT_ID`.
 
 #### `API_URL`
 
@@ -161,13 +175,58 @@ Run the utility from the project directory:
 .\.venv\Scripts\python.exe .\interactive_api.py
 ```
 
-The main menu provides these options:
+The startup menu adapts to the local site catalogue. If `site_codes.env` is missing
+or contains no valid sites, only the initial setup actions are shown:
 
-- Enter a site number to list its switches.
-- Enter `A` to download configurations for every switch in every listed site.
-- Enter `0` to exit.
+```text
+Welcome to the Securitas Juniper Mist API Tool
 
-After selecting a switch, its configuration is written as JSON to:
+You do not currently have any local Mist sites configured.
+
+Initial setup
+  1: Validate .env settings, API token, and organisation access
+  2: Download the local Mist site catalogue
+
+  0: Exit
+```
+
+After at least one site has been downloaded, the program switches automatically to
+the operational menu and hides the initial setup actions:
+
+```text
+Welcome to the Securitas Juniper Mist API Tool
+
+Read-only operations
+  1: Export all device configurations to outputs
+  2: Open read-only device tools
+
+Export configuration from a source device (no changes)
+  This exports the selected configuration type to upload_config.json,
+  ready for upload to another Juniper device.
+  3: Collect VLAN configuration from source device and insert into upload_config.json
+
+Configuration change
+  4: PUSH upload_config.json to destination device [DANGER]
+
+  0: Exit
+```
+
+Initial-setup option `1` checks that `.env` exists and has the required values, calls
+`GET /api/v1/self` to validate the token, probes the configured organisation's site
+list, and reports whether the local catalogue is available. The token is never
+printed. Initial-setup option `2` downloads every site and replaces `site_codes.env`.
+
+Operational option `1` exports configurations for every device returned by each site,
+including switches, access points, and gateways/firewalls. Option `2` asks for a site
+and switch, then offers only these switch-specific read-only actions:
+
+```text
+1: Download this switch configuration
+2: Export wired clients to CSV
+0: Cancel
+```
+
+A single-switch configuration download is written as JSON to:
 
 ```text
 outputs/<switch-name>.log
@@ -177,16 +236,111 @@ The `outputs` directory is created automatically. Invalid filename characters ar
 
 ## Optional configuration upload
 
-After downloading one switch configuration, the utility asks whether to upload `upload_config.json` to that switch.
+Top-level option `4` previews and applies the partial JSON object in
+`upload_config.json` to one explicitly selected switch. It is intentionally separate
+from all download and preparation paths.
 
 To use this feature:
 
-1. Place `upload_config.json` in the project directory.
+1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
-3. Select the intended site and switch carefully.
-4. Answer `y` only after reviewing the file and selected device.
+3. Remove a stale `upload_config.meta.json` if this is a manually managed payload.
+4. Choose option `4` and type `APPLY CUSTOM CONFIG` at the danger gate.
+5. Select the intended site and switch carefully.
+6. Review the unified dry-run diff limited to the payload fields.
+7. Type the target switch name exactly to approve the PUT.
 
-Uploading performs a Mist API `PUT` against the selected switch and changes its configuration. Take a current configuration export first and test changes through the normal change-control process. Leave `upload_config.json` empty or answer `n` when only collecting configurations.
+Immediately before the PUT, the utility writes a timestamped copy of the target's
+current configuration to `backups/`. After the PUT, it reads the switch again and
+checks that every uploaded field matches the requested value. Both `backups/` and
+`upload_config.json` should be handled as sensitive operational data. Leave
+`upload_config.json` empty or answer `n` when only collecting configurations.
+
+## Export wired clients to CSV
+
+Read-only device-tool option `2` pulls every wired client seen on the selected
+switch/stack and writes them to:
+
+```text
+outputs/<site>_<switch>_wired_clients_<YYYYMMDD-HHMMSS>.csv
+```
+
+You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, switch_name, port_id, vlan, manufacture, dhcp_hostname, last_seen_utc`.
+
+Notes:
+
+- The client IP is only present where Mist has learned one (DHCP snooping or the switch ARP table), so the `ip` column is often blank — this is expected, not an error.
+- Rows are ordered by switch port (stack members grouped together).
+- The export mirrors the portal's Wired Clients page (data comes from the Mist `wired_clients/search` endpoint).
+- Repeated exports never silently overwrite a CSV; a numeric suffix is added if a timestamped name already exists.
+
+## Create a VLAN source dataset
+
+Top-level option `3` is a preparation workflow. It performs read-only Mist API calls
+to collect one selected source switch's validated `networks` dataset and writes it to
+the ignored local file `upload_config.json`. **Option 3 does not ask for a destination,
+send a PUT, or change a Mist device.**
+
+After source selection, the tool fetches the configuration into memory, extracts and
+validates `networks`, then atomically creates or replaces `upload_config.json` in the
+form `{"networks": {...}}` without another confirmation prompt. Ignored
+`upload_config.meta.json` records the source identity and dataset hash. The destination
+is selected only after entering dangerous option `4`.
+
+When option `4` recognises a VLAN source dataset, it asks for the destination site and
+switch, reads that destination's current networks, and then applies these comparison
+rules:
+
+The comparison uses both the network name and `vlan_id`:
+
+- An identical name and definition is already present and is skipped.
+- A missing name with an unused VLAN ID is safe and is proposed as an addition.
+- The same name with different settings is a conflict and is skipped.
+- A VLAN ID already used under another name is a conflict and is skipped.
+- Case-insensitive name collisions and duplicate source VLAN IDs are conflicts and
+  are skipped.
+
+Option `4` prints a summary plus an additions-only JSON diff. If there are no safe
+additions, nothing is sent to Mist.
+
+Mist `PUT` semantics require special care: a nested object included in a request
+replaces that object in its entirety. Sending only the missing entries inside
+`networks` could therefore remove the destination's existing networks. The source
+dataset is never sent directly. Option `4` constructs this final API payload in memory:
+
+```json
+{
+  "networks": {
+    "<every existing destination network>": {},
+    "<safe missing source networks>": {}
+  }
+}
+```
+
+Option `4` verifies the dataset hash, performs a GET, and displays an additions-only
+JSON preview for the selected destination without unified-diff hunk markers. It states
+how many existing networks remain unchanged, requires the exact destination switch
+name, then reads the destination
+again and aborts if its networks changed during review. It retains the timestamped
+backup and post-PUT verification. See Juniper's
+[RESTful API overview](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/restful-api-overview.html)
+and [Update Site Device API reference](https://www.juniper.net/documentation/us/en/software/mist/api/http/api/sites/devices/update-site-device).
+
+## Run the tests
+
+The test suite uses mocked Mist responses and does not require a token or network
+access:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+The 54 tests cover site-key generation, pagination and cursor safeguards, response
+mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
+classification, source-dataset hashing, destination-time full-map construction,
+concurrent-change aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
+separation, all-device bulk export, token-redaction behaviour, and protection against
+stale environment tokens masking edits to `.env`.
 
 ## Refreshing sites
 
@@ -196,7 +350,9 @@ When the Mist site list changes, regenerate `site_codes.env` before opening the 
 .\.venv\Scripts\python.exe .\get_site_ids.py
 ```
 
-The interactive utility does not query the organisation site-list endpoint; it uses the contents of the generated file.
+The interactive utility normally uses the generated file. If the file is missing or
+empty, its initial-setup menu can query the organisation site-list endpoint and
+rebuild it with option `2`.
 
 ## VS Code
 
@@ -220,7 +376,8 @@ Confirm `.env` is alongside the scripts and contains non-empty `API_URL`, `MIST_
 
 ### `site_codes.env` was not found
 
-Run `get_site_ids.py` successfully before starting `interactive_api.py`.
+Start `interactive_api.py` and use initial-setup option `2`, or run
+`get_site_ids.py` directly.
 
 ### HTTP 401 or 403
 
@@ -234,6 +391,17 @@ Run `get_site_ids.py` again. The generated keys reflect the current site names r
 
 Confirm internet access, DNS resolution, proxy/firewall rules, and connectivity to the configured Mist API URL.
 
+The interactive validator converts low-level networking exceptions into concise
+operator messages. Examples include:
+
+```text
+API hostname 'api.example.invalid' could not be resolved. Check API_URL and the Mist cloud region.
+Connection to 'api.eu.mist.com' timed out. Check network access and API_URL.
+TLS validation failed for 'api.eu.mist.com'. Check API_URL and certificates.
+The API token was rejected (HTTP 401). Check MIST_API_KEY.
+Mist denied access (HTTP 403). Check token permissions and ORG_ID.
+```
+
 ### PowerShell blocks virtual-environment activation
 
 Activation is not required. Run scripts using `.\.venv\Scripts\python.exe` as shown above.
@@ -246,7 +414,12 @@ The following files and directories should remain excluded from Git:
 .env
 site_codes.env
 outputs/
+backups/
+upload_config.json
+upload_config.meta.json
 __pycache__/
 ```
 
-Treat downloaded switch configurations as sensitive operational data. Store, share, and delete them according to the organisation's security requirements.
+Treat downloaded device configurations and prepared upload files as sensitive
+operational data. Store, share, and delete them according to the organisation's
+security requirements.
