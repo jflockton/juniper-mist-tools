@@ -65,9 +65,16 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("Welcome to the Securitas Juniper Mist API Tool", text)
         self.assertIn("1 configured site(s)", text)
         self.assertIn("Read-only operations", text)
-        self.assertIn("Configuration preparation (no API changes)", text)
-        self.assertIn("Configuration changes", text)
-        self.assertIn("Create VLAN source dataset in upload_config.json", text)
+        self.assertIn("Export all device configurations to outputs", text)
+        self.assertNotIn("Export all device configurations to outputs/", text)
+        self.assertIn("Export configuration from a source device (no changes)", text)
+        self.assertIn("Configuration change", text)
+        self.assertIn(
+            "Collect VLAN configuration from source device and insert into "
+            "upload_config.json",
+            text,
+        )
+        self.assertIn("PUSH upload_config.json to destination device [DANGER]", text)
         self.assertNotIn("NON-PRODUCTION", text)
         self.assertIn("[DANGER]", text)
         self.assertNotIn("Validate .env", text)
@@ -84,7 +91,7 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("Validate .env", text)
         self.assertIn("Download the local Mist site catalogue", text)
         self.assertNotIn("Export all device configurations", text)
-        self.assertNotIn("Configuration changes", text)
+        self.assertNotIn("Configuration change", text)
 
     def test_main_moves_from_initial_setup_to_operational_menu(self):
         sites = [{"id": "1", "name": "Site"}]

@@ -641,6 +641,7 @@ def upload_config_with_preview(
     current_config,
     upload_data=None,
     expected_networks=None,
+    show_unified_diff=True,
 ):
     """Preview, confirm, back up, PUT, then verify a partial config payload."""
     if upload_data is None:
@@ -656,8 +657,17 @@ def upload_config_with_preview(
         return
 
     device_name = str(current_config.get("name") or "unknown_device")
-    print("\nDry-run preview (only payload fields are shown):")
-    print(preview)
+    if show_unified_diff:
+        print("\nDry-run preview (only payload fields are shown):")
+        print(preview)
+    else:
+        print("\nFinal VLAN change scope:")
+        print(f"  Destination switch: {device_name}")
+        print(
+            "  Existing destination networks included unchanged: "
+            f"{len(expected_networks or {})}"
+        )
+        print("  Only the additions listed above will be introduced.")
     confirmation = input(
         f"\nType the target switch name '{device_name}' to apply this PUT: "
     ).strip()
@@ -787,7 +797,9 @@ def select_destination_switch(sites, source_site, source_device):
     return destination_site, destination_device
 
 
-def print_network_merge_plan(plan, source_count, destination_count):
+def print_network_merge_plan(
+    plan, source_count, destination_count, destination_name=None
+):
     """Display the additions-only diff and every skipped conflict."""
     print("\nVLAN comparison summary:")
     print(f"  Source networks:      {source_count}")
@@ -810,7 +822,8 @@ def print_network_merge_plan(plan, source_count, destination_count):
             )
 
     if plan.additions:
-        print("\nAdditions-only JSON diff:")
+        target = f" to '{destination_name}'" if destination_name else ""
+        print(f"\nNetworks that will be added{target}:")
         print(json.dumps({"networks": plan.additions}, indent=2, sort_keys=True))
 
 
@@ -1026,6 +1039,11 @@ def run_custom_upload_action():
             return
 
     try:
+        if upload_metadata:
+            print(
+                f"\nGET: collecting current networks from destination switch "
+                f"'{device.get('name', 'Unnamed')}'..."
+            )
         current_config = get_device_info(site["id"], device["id"])
         effective_upload = upload_data
         expected_networks = None
@@ -1038,7 +1056,10 @@ def run_custom_upload_action():
             )
             plan = plan_network_merge(source_networks, destination_networks)
             print_network_merge_plan(
-                plan, len(source_networks), len(destination_networks)
+                plan,
+                len(source_networks),
+                len(destination_networks),
+                destination_name=device.get("name", "Unnamed"),
             )
             if not plan.additions:
                 print(
@@ -1053,12 +1074,12 @@ def run_custom_upload_action():
             }
             expected_networks = destination_networks
             print(
-                "\nThe PUT preview will contain the complete destination networks "
+                "\nThe API payload will contain the complete destination networks "
                 "map plus only the safe additions shown above. Existing destination "
-                "networks are preserved in the payload."
+                "networks will remain unchanged."
             )
         snapshot = save_device_config(current_config)
-        print(f"Current target configuration saved to {snapshot}")
+        print(f"Destination configuration snapshot saved to {snapshot}")
     except Exception as error:
         print(f"Could not read and save the target configuration: {error}")
         return
@@ -1068,6 +1089,7 @@ def run_custom_upload_action():
         current_config,
         upload_data=effective_upload,
         expected_networks=expected_networks,
+        show_unified_diff=not bool(upload_metadata),
     )
 
 
@@ -1091,12 +1113,19 @@ def print_main_menu(sites):
     print("=" * 72)
     print(f"Local site catalogue: {len(sites)} configured site(s)")
     print("\nRead-only operations")
-    print("  1: Export all device configurations to outputs/")
+    print("  1: Export all device configurations to outputs")
     print("  2: Open read-only device tools")
-    print("\nConfiguration preparation (no API changes)")
-    print("  3: Create VLAN source dataset in upload_config.json")
-    print("\nConfiguration changes")
-    print("  4: Apply upload_config.json to one switch [DANGER]")
+    print("\nExport configuration from a source device (no changes)")
+    print(
+        "  This exports the selected configuration type to upload_config.json,"
+    )
+    print("  ready for upload to another Juniper device.")
+    print(
+        "  3: Collect VLAN configuration from source device and insert into "
+        "upload_config.json"
+    )
+    print("\nConfiguration change")
+    print("  4: PUSH upload_config.json to destination device [DANGER]")
     print("\n  0: Exit")
 
 

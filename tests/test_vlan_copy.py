@@ -224,8 +224,46 @@ class VlanWorkflowTests(unittest.TestCase):
                 "networks": {"local": network(10), "new": network(20)}
             },
             expected_networks={"local": network(10)},
+            show_unified_diff=False,
         )
         self.assertIn("Missing / to add:     1", output.getvalue())
+        self.assertIn("Networks that will be added to 'Destination'", output.getvalue())
+
+    def test_vlan_preview_shows_only_additions_without_unified_hunks(self):
+        source_networks = {"new": network(20)}
+        destination_networks = {"local": network(10)}
+        plan = plan_network_merge(source_networks, destination_networks)
+        current_config = {
+            "name": "Destination",
+            "networks": destination_networks,
+        }
+        upload_data = {
+            "networks": {"local": network(10), "new": network(20)}
+        }
+        with (
+            patch("builtins.input", return_value="cancel"),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.print_network_merge_plan(
+                plan,
+                len(source_networks),
+                len(destination_networks),
+                destination_name="Destination",
+            )
+            interactive_api.upload_config_with_preview(
+                "site-a",
+                "destination-id",
+                current_config,
+                upload_data=upload_data,
+                expected_networks=destination_networks,
+                show_unified_diff=False,
+            )
+
+        text = output.getvalue()
+        self.assertIn("Networks that will be added to 'Destination'", text)
+        self.assertIn('"new"', text)
+        self.assertIn("Existing destination networks included unchanged: 1", text)
+        self.assertNotIn("@@", text)
 
     def test_vlan_upload_aborts_if_destination_changes_after_comparison(self):
         upload_data = {

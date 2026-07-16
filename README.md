@@ -3,7 +3,7 @@
 This project provides a small Python utility for working with Juniper Mist switch configurations and wired-client inventory:
 
 - `get_site_ids.py` retrieves all sites in a Mist organisation and generates `site_codes.env`.
-- `interactive_api.py` lets an operator select a site and switch, download switch configuration, export wired clients to CSV, safely copy missing VLANs to another switch, export configurations for every switch, or preview and optionally upload JSON configuration to one switch.
+- `interactive_api.py` exports configurations for all site devices, provides read-only switch tools, creates source VLAN datasets, compares them with a selected destination, and previews or applies reviewed JSON configuration.
 - `mist_client.py` provides shared authentication, timeout, pagination-URL safety, and JSON handling for both scripts.
 
 There is no compilation or packaging step. Set up Python, install the dependencies, configure the Mist credentials, and run the scripts from the project directory.
@@ -197,14 +197,16 @@ the operational menu and hides the initial setup actions:
 Welcome to the Securitas Juniper Mist API Tool
 
 Read-only operations
-  1: Export all device configurations to outputs/
+  1: Export all device configurations to outputs
   2: Open read-only device tools
 
-Configuration preparation (no API changes)
-  3: Create VLAN source dataset in upload_config.json
+Export configuration from a source device (no changes)
+  This exports the selected configuration type to upload_config.json,
+  ready for upload to another Juniper device.
+  3: Collect VLAN configuration from source device and insert into upload_config.json
 
-Configuration changes
-  4: Apply upload_config.json to one switch [DANGER]
+Configuration change
+  4: PUSH upload_config.json to destination device [DANGER]
 
   0: Exit
 ```
@@ -315,8 +317,10 @@ dataset is never sent directly. Option `4` constructs this final API payload in 
 }
 ```
 
-Option `4` verifies the dataset hash, displays the comparison and final field-limited
-PUT preview, requires the exact destination switch name, then reads the destination
+Option `4` verifies the dataset hash, performs a GET, and displays an additions-only
+JSON preview for the selected destination without unified-diff hunk markers. It states
+how many existing networks remain unchanged, requires the exact destination switch
+name, then reads the destination
 again and aborts if its networks changed during review. It retains the timestamped
 backup and post-PUT verification. See Juniper's
 [RESTful API overview](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/restful-api-overview.html)
@@ -331,7 +335,7 @@ access:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The 53 tests cover site-key generation, pagination and cursor safeguards, response
+The 54 tests cover site-key generation, pagination and cursor safeguards, response
 mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
 classification, source-dataset hashing, destination-time full-map construction,
 concurrent-change aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
