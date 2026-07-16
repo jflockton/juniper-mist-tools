@@ -204,6 +204,13 @@ def refresh_site_catalogue():
         print(f"Site catalogue refresh failed: {error}")
         return False
 
+    if written == 0:
+        print(
+            "No sites were returned for this organisation. "
+            "Initial setup is still required."
+        )
+        return False
+
     print(f"Site catalogue refreshed: {written} site(s) written to {SITE_CODES_FILE}")
     return True
 
@@ -861,7 +868,7 @@ def load_sites_for_action():
         return get_sites()
     except RuntimeError as error:
         print(f"\nLocal site catalogue is unavailable: {error}")
-        print("Run menu option 2 to download the organisation site list.")
+        print("Return to the menu to open initial setup and download the site list.")
         return None
 
 
@@ -1009,29 +1016,35 @@ def run_custom_upload_action():
     upload_config_with_preview(site["id"], device["id"], current_config)
 
 
-def print_main_menu():
+def print_initial_setup_menu(catalogue_error):
+    """Show only the actions needed before device operations are available."""
+    print("\n" + "=" * 72)
+    print("Welcome to the Securitas Juniper Mist API Tool")
+    print("=" * 72)
+    print("\nYou do not currently have any local Mist sites configured.")
+    print(f"Catalogue status: {catalogue_error}")
+    print("\nInitial setup")
+    print("  1: Validate .env settings, API token, and organisation access")
+    print("  2: Download the local Mist site catalogue")
+    print("\n  0: Exit")
+
+
+def print_main_menu(sites):
+    """Show operational actions after the local site catalogue is available."""
     settings = read_settings()
-    try:
-        site_count = len(get_sites())
-        catalogue_status = f"{site_count} local site(s)"
-    except RuntimeError:
-        catalogue_status = "not loaded"
     vlan_status = "ARMED — NON-PRODUCTION ONLY" if vlan_copy_enabled(settings) else "disabled"
 
     print("\n" + "=" * 72)
     print("Welcome to the Securitas Juniper Mist API Tool")
     print("=" * 72)
-    print(f"Local site catalogue: {catalogue_status}")
+    print(f"Local site catalogue: {len(sites)} configured site(s)")
     print(f"VLAN copy safety gate: {vlan_status}")
-    print("\nSetup and validation")
-    print("  1: Validate .env settings, API token, and organisation access")
-    print("  2: Refresh the local Mist site catalogue")
     print("\nRead-only operations")
-    print("  3: Export all switch configurations to outputs/")
-    print("  4: Open read-only device tools")
+    print("  1: Export all switch configurations to outputs/")
+    print("  2: Open read-only device tools")
     print("\nConfiguration changes")
-    print("  5: Copy missing VLANs [NON-PRODUCTION ONLY]")
-    print("  6: Apply upload_config.json to one switch [DANGER]")
+    print("  3: Copy missing VLANs [NON-PRODUCTION ONLY]")
+    print("  4: Apply upload_config.json to one switch [DANGER]")
     print("\n  0: Exit")
 
 
@@ -1043,25 +1056,37 @@ def main():
         pass
 
     while True:
-        print_main_menu()
+        try:
+            sites = get_sites()
+        except RuntimeError as error:
+            print_initial_setup_menu(error)
+            choice = input("\nChoose a setup option: ").strip()
+            if choice == "0":
+                print("Exiting.")
+                return
+            if choice == "1":
+                validate_api_configuration()
+            elif choice == "2":
+                refresh_site_catalogue()
+            else:
+                print("Invalid selection. Enter 0, 1, or 2.")
+            continue
+
+        print_main_menu(sites)
         choice = input("\nChoose an option: ").strip()
         if choice == "0":
             print("Exiting.")
             return
         if choice == "1":
-            validate_api_configuration()
-        elif choice == "2":
-            refresh_site_catalogue()
-        elif choice == "3":
             run_export_all_action()
-        elif choice == "4":
+        elif choice == "2":
             run_device_tools_action()
-        elif choice == "5":
+        elif choice == "3":
             run_vlan_copy_action()
-        elif choice == "6":
+        elif choice == "4":
             run_custom_upload_action()
         else:
-            print("Invalid selection. Enter a number from 0 to 6.")
+            print("Invalid selection. Enter a number from 0 to 4.")
 
 if __name__ == "__main__":
     main()

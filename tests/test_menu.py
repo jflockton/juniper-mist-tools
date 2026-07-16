@@ -81,17 +81,67 @@ class MenuSafetyTests(unittest.TestCase):
     def test_main_menu_separates_read_only_and_change_operations(self):
         with (
             patch.object(interactive_api, "read_settings", return_value={}),
-            patch.object(interactive_api, "get_sites", return_value=[{"id": "1"}]),
             redirect_stdout(StringIO()) as output,
         ):
-            interactive_api.print_main_menu()
+            interactive_api.print_main_menu([{"id": "1"}])
 
         text = output.getvalue()
         self.assertIn("Welcome to the Securitas Juniper Mist API Tool", text)
+        self.assertIn("1 configured site(s)", text)
         self.assertIn("Read-only operations", text)
         self.assertIn("Configuration changes", text)
         self.assertIn("NON-PRODUCTION ONLY", text)
         self.assertIn("[DANGER]", text)
+        self.assertNotIn("Validate .env", text)
+        self.assertNotIn("Download the local Mist site catalogue", text)
+
+    def test_initial_setup_menu_hides_device_operations(self):
+        with redirect_stdout(StringIO()) as output:
+            interactive_api.print_initial_setup_menu(
+                "site_codes.env contains no valid site entries"
+            )
+
+        text = output.getvalue()
+        self.assertIn("You do not currently have any local Mist sites configured", text)
+        self.assertIn("Validate .env", text)
+        self.assertIn("Download the local Mist site catalogue", text)
+        self.assertNotIn("Export all switch configurations", text)
+        self.assertNotIn("Configuration changes", text)
+
+    def test_main_moves_from_initial_setup_to_operational_menu(self):
+        sites = [{"id": "1", "name": "Site"}]
+        with (
+            patch.object(interactive_api, "configure_client"),
+            patch.object(
+                interactive_api,
+                "get_sites",
+                side_effect=[RuntimeError("catalogue missing"), sites],
+            ),
+            patch.object(
+                interactive_api, "refresh_site_catalogue", return_value=True
+            ) as refresh,
+            patch("builtins.input", side_effect=["2", "0"]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.main()
+
+        refresh.assert_called_once_with()
+        text = output.getvalue()
+        self.assertIn("Initial setup", text)
+        self.assertIn("1 configured site(s)", text)
+
+    def test_main_uses_renumbered_operational_actions(self):
+        sites = [{"id": "1", "name": "Site"}]
+        with (
+            patch.object(interactive_api, "configure_client"),
+            patch.object(interactive_api, "get_sites", return_value=sites),
+            patch.object(interactive_api, "run_export_all_action") as export_all,
+            patch("builtins.input", side_effect=["1", "0"]),
+            redirect_stdout(StringIO()),
+        ):
+            interactive_api.main()
+
+        export_all.assert_called_once_with()
 
     def test_download_switch_config_is_read_only(self):
         config = {"id": "device", "name": "Switch"}
@@ -199,6 +249,19 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertTrue(result)
         get_all.assert_called_once_with(client, "org-id")
         write.assert_called_once_with(sites)
+
+    def test_empty_catalogue_keeps_initial_setup_active(self):
+        with (
+            patch.object(interactive_api, "ensure_client", return_value=object()),
+            patch.object(interactive_api, "_SETTINGS", {"ORG_ID": "org-id"}),
+            patch.object(interactive_api, "get_all_sites", return_value=[]),
+            patch.object(interactive_api, "write_site_codes", return_value=0),
+            redirect_stdout(StringIO()) as output,
+        ):
+            result = interactive_api.refresh_site_catalogue()
+
+        self.assertFalse(result)
+        self.assertIn("Initial setup is still required", output.getvalue())
 
     def test_custom_upload_requires_separate_danger_phrase(self):
         with (
