@@ -1,10 +1,9 @@
-import os
 import re
 import sys
 from pathlib import Path
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 from mist_client import MistClient
 
@@ -15,12 +14,15 @@ PAGE_LIMIT = 1000
 
 
 def load_settings():
-    load_dotenv(BASE_DIR / ".env")
+    values = dotenv_values(BASE_DIR / ".env", interpolate=False)
+
+    def value(name):
+        return str(values.get(name) or "").strip()
 
     settings = {
-        "API_URL": os.getenv("API_URL", "").strip(),
-        "MIST_API_KEY": os.getenv("MIST_API_KEY", "").strip(),
-        "ORG_ID": os.getenv("ORG_ID", "").strip(),
+        "API_URL": value("API_URL"),
+        "MIST_API_KEY": value("MIST_API_KEY"),
+        "ORG_ID": value("ORG_ID"),
     }
     missing = [name for name, value in settings.items() if not value]
     if missing:

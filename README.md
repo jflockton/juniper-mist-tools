@@ -99,6 +99,11 @@ for its validation and site-catalogue refresh actions. VLAN copy is locked unles
 `ENABLE_NON_PRODUCTION_VLAN_COPY=true`; leave it false or absent on production
 workstations.
 
+The `.env` file is authoritative and is read again for every top-level API action.
+An older value inherited from VS Code or the process environment cannot override a
+changed file value. A failed validation also clears any previously valid in-memory
+API client.
+
 ### Obtain the Mist API values
 
 #### `MIST_API_KEY`
@@ -257,7 +262,7 @@ Notes:
 ## Copy missing VLANs
 
 Top-level option `5` is disabled by default. To make it available for a controlled
-non-production test, set this explicitly and restart the tool:
+non-production test, set this explicitly; the menu re-reads `.env` on its next loop:
 
 ```env
 ENABLE_NON_PRODUCTION_VLAN_COPY=true
@@ -315,11 +320,12 @@ access:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The 39 tests cover site-key generation, pagination and cursor safeguards, response
+The 43 tests cover site-key generation, pagination and cursor safeguards, response
 mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
 classification, full-map merge construction, concurrent-change aborts, and
 post-PUT preservation checks. Menu tests also enforce the default-disabled VLAN gate,
-the exact warning phrase, read-only/write separation, and token-redaction behaviour.
+the exact warning phrase, read-only/write separation, token-redaction behaviour, and
+protection against stale environment tokens masking edits to `.env`.
 
 ## Refreshing sites
 

@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,27 @@ class PagedClient:
 
 
 class SiteIdTests(unittest.TestCase):
+    def test_load_settings_uses_dotenv_instead_of_stale_process_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            env_file.write_text(
+                "API_URL=https://api.eu.mist.com\n"
+                "MIST_API_KEY=file-token\n"
+                "ORG_ID=file-org\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(get_site_ids, "BASE_DIR", Path(temp_dir)),
+                patch.dict(
+                    os.environ,
+                    {"MIST_API_KEY": "stale-process-token"},
+                    clear=False,
+                ),
+            ):
+                settings = get_site_ids.load_settings()
+
+        self.assertEqual(settings["MIST_API_KEY"], "file-token")
+
     def test_make_env_key_normalises_punctuation(self):
         self.assertEqual(
             get_site_ids.make_env_key("Milton Keynes / SOC"),

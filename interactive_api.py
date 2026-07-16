@@ -1,14 +1,13 @@
 import csv
 import difflib
 import json
-import os
 import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
-from dotenv import dotenv_values, load_dotenv
+from dotenv import dotenv_values
 
 from get_site_ids import get_all_sites, write_site_codes
 from mist_client import MistClient
@@ -36,12 +35,16 @@ CUSTOM_UPLOAD_ACKNOWLEDGEMENT = "APPLY CUSTOM CONFIG"
 
 def read_settings():
     """Read settings for status display without requiring them to be complete."""
-    load_dotenv(BASE_DIR / ".env")
+    values = dotenv_values(BASE_DIR / ".env", interpolate=False)
+
+    def value(name):
+        return str(values.get(name) or "").strip()
+
     return {
-        "API_URL": os.getenv("API_URL", "").strip(),
-        "MIST_API_KEY": os.getenv("MIST_API_KEY", "").strip(),
-        "ORG_ID": os.getenv("ORG_ID", "").strip(),
-        VLAN_COPY_ENV_FLAG: os.getenv(VLAN_COPY_ENV_FLAG, "").strip(),
+        "API_URL": value("API_URL"),
+        "MIST_API_KEY": value("MIST_API_KEY"),
+        "ORG_ID": value("ORG_ID"),
+        VLAN_COPY_ENV_FLAG: value(VLAN_COPY_ENV_FLAG),
     }
 
 
@@ -59,6 +62,8 @@ def load_settings():
 def configure_client(settings=None):
     """Create the shared Mist client used by interactive operations."""
     global _CLIENT, _SETTINGS
+    _CLIENT = None
+    _SETTINGS = None
     settings = settings or load_settings()
     _CLIENT = MistClient(
         settings["API_URL"], settings["MIST_API_KEY"], timeout=REQUEST_TIMEOUT
@@ -81,9 +86,8 @@ def vlan_copy_enabled(settings=None):
 
 def ensure_client():
     """Return a configured client or explain how to repair local settings."""
-    if _CLIENT is not None:
-        return _CLIENT
     try:
+        # Re-read .env for every top-level action; never reuse a stale token.
         return configure_client()
     except (RuntimeError, ValueError) as error:
         print(f"\nAPI client is not ready: {error}")
@@ -115,6 +119,9 @@ def get_sites():
 def validate_api_configuration():
     """Validate local settings, token authentication, org access, and site cache."""
     global _CLIENT, _SETTINGS
+    # A failed retest must not leave a previously valid client available.
+    _CLIENT = None
+    _SETTINGS = None
     print("\nConfiguration and API validation")
     print("-" * 40)
 

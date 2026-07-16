@@ -1,9 +1,13 @@
+import os
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from pathlib import Path
 from unittest.mock import patch
 
 import interactive_api
+import requests
 
 
 class FakeValidationClient:
@@ -18,6 +22,27 @@ class FakeValidationClient:
 
 
 class MenuSafetyTests(unittest.TestCase):
+    def test_read_settings_uses_current_dotenv_not_stale_process_value(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            env_file = Path(temp_dir) / ".env"
+            env_file.write_text(
+                "API_URL=https://api.eu.mist.com\n"
+                "MIST_API_KEY=changed-file-token\n"
+                "ORG_ID=org-id\n",
+                encoding="utf-8",
+            )
+            with (
+                patch.object(interactive_api, "BASE_DIR", Path(temp_dir)),
+                patch.dict(
+                    os.environ,
+                    {"MIST_API_KEY": "old-valid-process-token"},
+                    clear=False,
+                ),
+            ):
+                settings = interactive_api.read_settings()
+
+        self.assertEqual(settings["MIST_API_KEY"], "changed-file-token")
+
     def test_vlan_copy_feature_flag_is_disabled_by_default(self):
         self.assertFalse(interactive_api.vlan_copy_enabled({}))
         self.assertTrue(
@@ -121,6 +146,43 @@ class MenuSafetyTests(unittest.TestCase):
 
         self.assertFalse(result)
         mist_client.assert_not_called()
+
+    def test_failed_validation_clears_previously_valid_client(self):
+        settings = {
+            "API_URL": "https://api.eu.mist.com",
+            "MIST_API_KEY": "changed-invalid-token",
+            "ORG_ID": "org-id",
+            interactive_api.VLAN_COPY_ENV_FLAG: "",
+        }
+        failing_client = FakeValidationClient()
+        failing_client.get_json = lambda *args, **kwargs: (_ for _ in ()).throw(
+            requests.ConnectionError("authentication failed")
+        )
+        with (
+            patch.object(interactive_api, "read_settings", return_value=settings),
+            patch.object(interactive_api, "MistClient", return_value=failing_client),
+            patch.object(interactive_api, "_CLIENT", object()),
+            patch.object(interactive_api, "_SETTINGS", {"old": "settings"}),
+            redirect_stdout(StringIO()),
+        ):
+            result = interactive_api.validate_api_configuration()
+            self.assertIsNone(interactive_api._CLIENT)
+            self.assertIsNone(interactive_api._SETTINGS)
+
+        self.assertFalse(result)
+
+    def test_ensure_client_reloads_dotenv_for_each_top_level_action(self):
+        new_client = object()
+        with (
+            patch.object(interactive_api, "_CLIENT", object()),
+            patch.object(
+                interactive_api, "configure_client", return_value=new_client
+            ) as configure,
+        ):
+            result = interactive_api.ensure_client()
+
+        self.assertIs(result, new_client)
+        configure.assert_called_once_with()
 
     def test_refresh_site_catalogue_uses_configured_org(self):
         client = object()
