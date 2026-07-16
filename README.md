@@ -320,7 +320,7 @@ access:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The 43 tests cover site-key generation, pagination and cursor safeguards, response
+The 46 tests cover site-key generation, pagination and cursor safeguards, response
 mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
 classification, full-map merge construction, concurrent-change aborts, and
 post-PUT preservation checks. Menu tests also enforce the default-disabled VLAN gate,
@@ -372,6 +372,17 @@ Run `get_site_ids.py` again. The generated keys reflect the current site names r
 ### Connection or timeout errors
 
 Confirm internet access, DNS resolution, proxy/firewall rules, and connectivity to the configured Mist API URL.
+
+The interactive validator converts low-level networking exceptions into concise
+operator messages. Examples include:
+
+```text
+API hostname 'api.example.invalid' could not be resolved. Check API_URL and the Mist cloud region.
+Connection to 'api.eu.mist.com' timed out. Check network access and API_URL.
+TLS validation failed for 'api.eu.mist.com'. Check API_URL and certificates.
+The API token was rejected (HTTP 401). Check MIST_API_KEY.
+Mist denied access (HTTP 403). Check token permissions and ORG_ID.
+```
 
 ### PowerShell blocks virtual-environment activation
 

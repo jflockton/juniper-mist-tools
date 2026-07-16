@@ -10,7 +10,7 @@ import requests
 from dotenv import dotenv_values
 
 from get_site_ids import get_all_sites, write_site_codes
-from mist_client import MistClient
+from mist_client import MistClient, describe_request_error
 from vlan_copy import (
     build_merged_networks,
     extract_networks,
@@ -164,12 +164,11 @@ def validate_api_configuration():
 
         _CLIENT = client
         _SETTINGS = settings
-    except requests.HTTPError as error:
-        status = error.response.status_code if error.response is not None else "?"
-        print(f"[FAIL] Mist API validation returned HTTP {status}")
+    except requests.RequestException as error:
+        print(f"[FAIL] {describe_request_error(error, settings['API_URL'])}")
         return False
-    except (requests.RequestException, RuntimeError, ValueError) as error:
-        print(f"[FAIL] Mist API validation failed: {error}")
+    except (RuntimeError, ValueError) as error:
+        print(f"[FAIL] API configuration is invalid: {error}")
         return False
 
     try:
@@ -198,11 +197,10 @@ def refresh_site_catalogue():
     try:
         sites = get_all_sites(client, org_id)
         written = write_site_codes(sites)
-    except requests.HTTPError as error:
-        status = error.response.status_code if error.response is not None else "?"
-        print(f"Site catalogue refresh failed with HTTP {status}.")
+    except requests.RequestException as error:
+        print(f"Site catalogue refresh failed: {describe_request_error(error, settings['API_URL'])}")
         return False
-    except (requests.RequestException, OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:
         print(f"Site catalogue refresh failed: {error}")
         return False
 
@@ -513,6 +511,9 @@ def export_wired_clients_for_device(site, device):
         else:
             print(f"Mist API error fetching wired clients (HTTP {status}).")
         return
+    except requests.RequestException as error:
+        print(f"Failed to fetch wired clients: {describe_request_error(error, read_settings()['API_URL'])}")
+        return
     except Exception as error:
         print(f"Failed to fetch wired clients: {error}")
         return
@@ -639,11 +640,11 @@ def upload_config_with_preview(site_id, device_id, current_config):
             )
         else:
             print("Verification succeeded: all uploaded fields match Mist.")
-    except requests.HTTPError as error:
-        status = error.response.status_code if error.response is not None else "?"
-        print(f"PUT failed with HTTP {status}. The backup was retained.")
     except requests.RequestException as error:
-        print(f"PUT failed: {error}. The backup was retained.")
+        print(
+            f"PUT failed: {describe_request_error(error, read_settings()['API_URL'])} "
+            "The backup was retained."
+        )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"PUT failed: {error}")
 
@@ -845,11 +846,11 @@ def copy_missing_vlans(sites, source_site, source_device):
             f"VLAN copy succeeded: {len(plan.additions)} missing network(s) added; "
             f"all {len(fresh_networks)} pre-existing destination network(s) verified unchanged."
         )
-    except requests.HTTPError as error:
-        status = error.response.status_code if error.response is not None else "?"
-        print(f"VLAN copy PUT failed with HTTP {status}. No success was assumed.")
     except requests.RequestException as error:
-        print(f"VLAN copy request failed: {error}")
+        print(
+            "VLAN copy request failed: "
+            f"{describe_request_error(error, read_settings()['API_URL'])}"
+        )
     except (OSError, RuntimeError, ValueError) as error:
         print(f"VLAN copy failed: {error}")
 

@@ -1,6 +1,8 @@
 import unittest
 
-from mist_client import MistClient
+import requests
+
+from mist_client import MistClient, describe_request_error
 
 
 class FakeResponse:
@@ -27,6 +29,37 @@ class FakeRequester:
 
 
 class MistClientTests(unittest.TestCase):
+    def test_dns_error_is_concise_and_actionable(self):
+        error = requests.ConnectionError(
+            "HTTPSConnectionPool: NameResolutionError: Failed to resolve host"
+        )
+
+        message = describe_request_error(
+            error, "https://aaaaaaapi.eu.mist.com"
+        )
+
+        self.assertIn("'aaaaaaapi.eu.mist.com' could not be resolved", message)
+        self.assertIn("Check API_URL", message)
+        self.assertNotIn("HTTPSConnectionPool", message)
+
+    def test_http_401_points_to_api_key(self):
+        error = requests.HTTPError("raw response")
+        error.response = type("Response", (), {"status_code": 401})()
+
+        message = describe_request_error(error, "https://api.eu.mist.com")
+
+        self.assertEqual(
+            message, "The API token was rejected (HTTP 401). Check MIST_API_KEY."
+        )
+
+    def test_timeout_points_to_host_and_network(self):
+        message = describe_request_error(
+            requests.Timeout("raw timeout"), "https://api.eu.mist.com"
+        )
+
+        self.assertIn("'api.eu.mist.com' timed out", message)
+        self.assertNotIn("raw timeout", message)
+
     def test_request_applies_authentication_and_timeout(self):
         requester = FakeRequester({"ok": True})
         client = MistClient(
