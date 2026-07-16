@@ -1,5 +1,7 @@
 # Mist Switch Configuration Utility
 
+Current release: **v1.1**
+
 This project provides a small Python utility for working with Juniper Mist switch configurations and wired-client inventory:
 
 - `get_site_ids.py` retrieves all sites in a Mist organisation and generates `site_codes.env`.
