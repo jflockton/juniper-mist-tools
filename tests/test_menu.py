@@ -4,7 +4,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import interactive_api
 import requests
@@ -43,54 +43,31 @@ class MenuSafetyTests(unittest.TestCase):
 
         self.assertEqual(settings["MIST_API_KEY"], "changed-file-token")
 
-    def test_vlan_copy_feature_flag_is_disabled_by_default(self):
-        self.assertFalse(interactive_api.vlan_copy_enabled({}))
-        self.assertTrue(
-            interactive_api.vlan_copy_enabled(
-                {interactive_api.VLAN_COPY_ENV_FLAG: "true"}
-            )
-        )
-
-    def test_vlan_copy_action_stops_before_api_when_disabled(self):
+    def test_vlan_preparation_action_is_read_only_and_has_no_danger_gate(self):
         with (
-            patch.object(interactive_api, "read_settings", return_value={}),
-            patch.object(interactive_api, "ensure_client") as ensure_client,
-            redirect_stdout(StringIO()) as output,
-        ):
-            interactive_api.run_vlan_copy_action()
-
-        ensure_client.assert_not_called()
-        self.assertIn("DISABLED by default", output.getvalue())
-
-    def test_vlan_copy_warning_requires_exact_non_production_phrase(self):
-        settings = {interactive_api.VLAN_COPY_ENV_FLAG: "true"}
-        with (
-            patch.object(interactive_api, "read_settings", return_value=settings),
             patch.object(interactive_api, "ensure_client", return_value=object()),
-            patch.object(interactive_api, "load_sites_for_action") as load_sites,
-            patch("builtins.input", return_value="wrong phrase"),
+            patch.object(interactive_api, "load_sites_for_action", return_value=None),
             redirect_stdout(StringIO()) as output,
         ):
-            interactive_api.run_vlan_copy_action()
+            interactive_api.run_vlan_preparation_action()
 
-        load_sites.assert_not_called()
         text = output.getvalue()
-        self.assertIn("NON-PRODUCTION VLAN COPY ONLY", text)
-        self.assertIn("drop production traffic", text)
+        self.assertIn("writes a reviewed payload to upload_config.json", text)
+        self.assertIn("No configuration will be sent to Mist", text)
+        self.assertNotIn("NON-PRODUCTION", text)
 
     def test_main_menu_separates_read_only_and_change_operations(self):
-        with (
-            patch.object(interactive_api, "read_settings", return_value={}),
-            redirect_stdout(StringIO()) as output,
-        ):
+        with redirect_stdout(StringIO()) as output:
             interactive_api.print_main_menu([{"id": "1"}])
 
         text = output.getvalue()
         self.assertIn("Welcome to the Securitas Juniper Mist API Tool", text)
         self.assertIn("1 configured site(s)", text)
         self.assertIn("Read-only operations", text)
+        self.assertIn("Configuration preparation (no API changes)", text)
         self.assertIn("Configuration changes", text)
-        self.assertIn("NON-PRODUCTION ONLY", text)
+        self.assertIn("Prepare missing VLANs in upload_config.json", text)
+        self.assertNotIn("NON-PRODUCTION", text)
         self.assertIn("[DANGER]", text)
         self.assertNotIn("Validate .env", text)
         self.assertNotIn("Download the local Mist site catalogue", text)
@@ -105,7 +82,7 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("You do not currently have any local Mist sites configured", text)
         self.assertIn("Validate .env", text)
         self.assertIn("Download the local Mist site catalogue", text)
-        self.assertNotIn("Export all switch configurations", text)
+        self.assertNotIn("Export all device configurations", text)
         self.assertNotIn("Configuration changes", text)
 
     def test_main_moves_from_initial_setup_to_operational_menu(self):
@@ -148,7 +125,7 @@ class MenuSafetyTests(unittest.TestCase):
         with (
             patch.object(interactive_api, "ensure_client", return_value=object()),
             patch.object(interactive_api, "load_sites_for_action", return_value=sites),
-            patch.object(interactive_api, "export_all_switch_configs") as export_all,
+            patch.object(interactive_api, "export_all_device_configs") as export_all,
             patch("builtins.input", return_value="n") as prompt,
             redirect_stdout(StringIO()),
         ):
@@ -158,6 +135,32 @@ class MenuSafetyTests(unittest.TestCase):
             "\nExport device configurations from all 20 sites? (Y/N): "
         )
         export_all.assert_not_called()
+
+    def test_get_devices_only_filters_when_a_device_type_is_requested(self):
+        client = MagicMock()
+        client.get_json.return_value = []
+        with patch.object(interactive_api, "get_client", return_value=client):
+            interactive_api.get_devices("site-id")
+            _, kwargs = client.get_json.call_args
+            self.assertNotIn("type", kwargs["params"])
+
+            interactive_api.get_devices("site-id", device_type="switch")
+            _, kwargs = client.get_json.call_args
+            self.assertEqual(kwargs["params"]["type"], "switch")
+
+    def test_bulk_export_reports_sites_with_no_devices(self):
+        with (
+            patch.object(interactive_api, "get_devices", return_value=[]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.export_all_device_configs(
+                [{"id": "site-id", "name": "Gloucester"}]
+            )
+
+        text = output.getvalue()
+        self.assertIn("Collecting configurations for all devices", text)
+        self.assertIn("Site: Gloucester", text)
+        self.assertIn("No devices found", text)
 
     def test_download_switch_config_is_read_only(self):
         config = {"id": "device", "name": "Switch"}
@@ -176,7 +179,6 @@ class MenuSafetyTests(unittest.TestCase):
             "API_URL": "https://api.eu.mist.com",
             "MIST_API_KEY": "super-secret-token",
             "ORG_ID": "org-id",
-            interactive_api.VLAN_COPY_ENV_FLAG: "",
         }
         client = FakeValidationClient()
         with (
@@ -201,7 +203,6 @@ class MenuSafetyTests(unittest.TestCase):
             "API_URL": "https://api.eu.mist.com",
             "MIST_API_KEY": "token",
             "ORG_ID": "",
-            interactive_api.VLAN_COPY_ENV_FLAG: "",
         }
         with (
             patch.object(interactive_api, "read_settings", return_value=settings),
@@ -218,7 +219,6 @@ class MenuSafetyTests(unittest.TestCase):
             "API_URL": "https://api.eu.mist.com",
             "MIST_API_KEY": "changed-invalid-token",
             "ORG_ID": "org-id",
-            interactive_api.VLAN_COPY_ENV_FLAG: "",
         }
         failing_client = FakeValidationClient()
         failing_client.get_json = lambda *args, **kwargs: (_ for _ in ()).throw(

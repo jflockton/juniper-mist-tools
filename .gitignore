@@ -8,3 +8,4 @@ soc-vlans.json
 SOC-VLANS.json
 site_codes.env
 upload_config.json
+upload_config.target.json

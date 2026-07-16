@@ -19,7 +19,7 @@ There is no compilation or packaging step. Set up Python, install the dependenci
 | [Obtain the Mist API values](#obtain-the-mist-api-values) | Instructions for `MIST_API_KEY`, `ORG_ID`, and `API_URL` |
 | [Official Juniper reference URLs](#official-juniper-reference-urls) | Direct links to the relevant Juniper Mist documentation |
 | [3. Generate the site-code file](#3-generate-the-site-code-file) | Create or refresh `site_codes.env` |
-| [4. Run the interactive utility](#4-run-the-interactive-utility) | Select sites and switches or export all switch configurations |
+| [4. Run the interactive utility](#4-run-the-interactive-utility) | Select switches or export configurations for all site devices |
 | [Optional configuration upload](#optional-configuration-upload) | Preview, back up, apply, and verify `upload_config.json` |
 | [Export wired clients to CSV](#export-wired-clients-to-csv) | Export the selected switch's wired-client inventory |
 | [Copy missing VLANs](#copy-missing-vlans) | Safely add absent source VLANs to another switch |
@@ -99,13 +99,10 @@ The template contains:
 API_URL=https://api.eu.mist.com
 MIST_API_KEY=replace-with-api-token
 ORG_ID=replace-with-organisation-id
-ENABLE_NON_PRODUCTION_VLAN_COPY=false
 ```
 
 `get_site_ids.py` requires the first three values. `interactive_api.py` uses `ORG_ID`
-for its validation and site-catalogue refresh actions. VLAN copy is locked unless
-`ENABLE_NON_PRODUCTION_VLAN_COPY=true`; leave it false or absent on production
-workstations.
+for its validation and site-catalogue refresh actions.
 
 The `.env` file is authoritative and is read again for every top-level API action.
 An older value inherited from VS Code or the process environment cannot override a
@@ -200,11 +197,13 @@ the operational menu and hides the initial setup actions:
 Welcome to the Securitas Juniper Mist API Tool
 
 Read-only operations
-  1: Export all switch configurations to outputs/
+  1: Export all device configurations to outputs/
   2: Open read-only device tools
 
+Configuration preparation (no API changes)
+  3: Prepare missing VLANs in upload_config.json
+
 Configuration changes
-  3: Copy missing VLANs [NON-PRODUCTION ONLY]
   4: Apply upload_config.json to one switch [DANGER]
 
   0: Exit
@@ -215,8 +214,9 @@ Initial-setup option `1` checks that `.env` exists and has the required values, 
 list, and reports whether the local catalogue is available. The token is never
 printed. Initial-setup option `2` downloads every site and replaces `site_codes.env`.
 
-Operational option `1` exports all switch configurations. Option `2` asks for a site and switch,
-then offers only these read-only actions:
+Operational option `1` exports configurations for every device returned by each site,
+including switches, access points, and gateways/firewalls. Option `2` asks for a site
+and switch, then offers only these switch-specific read-only actions:
 
 ```text
 1: Download this switch configuration
@@ -234,18 +234,19 @@ The `outputs` directory is created automatically. Invalid filename characters ar
 
 ## Optional configuration upload
 
-Top-level option `6` previews and applies the partial JSON object in
+Top-level option `4` previews and applies the partial JSON object in
 `upload_config.json` to one explicitly selected switch. It is intentionally separate
-from all download/read-only paths.
+from all download and preparation paths.
 
 To use this feature:
 
 1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
-3. Choose option `6` and type `APPLY CUSTOM CONFIG` at the danger gate.
-4. Select the intended site and switch carefully.
-5. Review the unified dry-run diff limited to the payload fields.
-6. Type the target switch name exactly to approve the PUT.
+3. Remove a stale `upload_config.target.json` if this is a manually managed payload.
+4. Choose option `4` and type `APPLY CUSTOM CONFIG` at the danger gate.
+5. Select the intended site and switch carefully.
+6. Review the unified dry-run diff limited to the payload fields.
+7. Type the target switch name exactly to approve the PUT.
 
 Immediately before the PUT, the utility writes a timestamped copy of the target's
 current configuration to `backups/`. After the PUT, it reads the switch again and
@@ -271,23 +272,15 @@ Notes:
 - The export mirrors the portal's Wired Clients page (data comes from the Mist `wired_clients/search` endpoint).
 - Repeated exports never silently overwrite a CSV; a numeric suffix is added if a timestamped name already exists.
 
-## Copy missing VLANs
+## Prepare missing VLANs
 
-Top-level option `5` is disabled by default. To make it available for a controlled
-non-production test, set this explicitly; the menu re-reads `.env` on its next loop:
+Top-level option `3` is a preparation workflow. It performs read-only Mist API calls
+to collect the selected source and destination switch configurations, compares their
+`networks` objects, and writes a proposed payload to the ignored local file
+`upload_config.json`. **Option 3 never sends a PUT or changes a Mist device.**
 
-```env
-ENABLE_NON_PRODUCTION_VLAN_COPY=true
-```
-
-The tool then displays a prominent warning that VLAN configuration may be temporarily
-removed/reapplied while Mist processes the PUT, potentially interrupting switching
-and dropping traffic. It requires the exact phrase `NON-PRODUCTION VLAN COPY` before
-source selection. **Do not enable or use this action for production switches.**
-
-After the gate, the selected switch becomes the source. The tool prompts for a
-destination site and switch, so controlled copying can be performed within one site
-or across sites.
+The selected switch becomes the source. The tool then prompts for a destination site
+and switch, so a payload can be prepared within one site or across sites.
 
 The comparison uses both the network name and `vlan_id`:
 
@@ -299,12 +292,14 @@ The comparison uses both the network name and `vlan_id`:
   are skipped.
 
 The utility prints a summary plus an additions-only JSON diff. If there are safe
-additions, the operator must type the destination switch name exactly.
+additions, the operator must type the destination switch name exactly before the
+local file is created or replaced.
 
 Mist `PUT` semantics require special care: a nested object included in a request
 replaces that object in its entirety. Sending only the missing entries inside
-`networks` could therefore remove the destination's existing networks. The utility
-instead sends exactly one top-level field whose value is the complete safe merge:
+`networks` could therefore remove the destination's existing networks. The prepared
+file therefore contains exactly one top-level field whose value is the complete safe
+merge:
 
 ```json
 {
@@ -315,11 +310,15 @@ instead sends exactly one top-level field whose value is the complete safe merge
 }
 ```
 
-Immediately before the PUT, the utility reads the destination again and aborts if
-its networks changed after the preview. It saves a timestamped destination backup,
-applies the merged map, reads the device back, and verifies that every pre-existing
-network is unchanged and every proposed addition matches the source. No other device
-configuration fields are sent. See Juniper's
+Immediately before writing the files, option `3` reads the destination again and
+aborts if its networks changed after the preview. It also creates the ignored
+`upload_config.target.json`, which binds the payload hash to the intended site,
+switch, and destination-network snapshot.
+
+If option `4` later loads this prepared payload, it uses the bound target and aborts
+before PUT if either the payload was edited/replaced or the target networks changed
+after preparation. Option `4` still displays the danger gate, dry-run diff, exact
+switch-name confirmation, timestamped backup, and post-PUT verification. See Juniper's
 [RESTful API overview](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/restful-api-overview.html)
 and [Update Site Device API reference](https://www.juniper.net/documentation/us/en/software/mist/api/http/api/sites/devices/update-site-device).
 
@@ -332,12 +331,12 @@ access:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The 46 tests cover site-key generation, pagination and cursor safeguards, response
+The 53 tests cover site-key generation, pagination and cursor safeguards, response
 mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
-classification, full-map merge construction, concurrent-change aborts, and
-post-PUT preservation checks. Menu tests also enforce the default-disabled VLAN gate,
-the exact warning phrase, read-only/write separation, token-redaction behaviour, and
-protection against stale environment tokens masking edits to `.env`.
+classification, full-map merge construction, target binding, concurrent-change
+aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
+separation, all-device bulk export, token-redaction behaviour, and protection against
+stale environment tokens masking edits to `.env`.
 
 ## Refreshing sites
 
@@ -412,7 +411,11 @@ The following files and directories should remain excluded from Git:
 site_codes.env
 outputs/
 backups/
+upload_config.json
+upload_config.target.json
 __pycache__/
 ```
 
-Treat downloaded switch configurations as sensitive operational data. Store, share, and delete them according to the organisation's security requirements.
+Treat downloaded device configurations and prepared upload files as sensitive
+operational data. Store, share, and delete them according to the organisation's
+security requirements.
