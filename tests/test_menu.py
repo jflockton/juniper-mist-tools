@@ -52,7 +52,8 @@ class MenuSafetyTests(unittest.TestCase):
             interactive_api.run_vlan_preparation_action()
 
         text = output.getvalue()
-        self.assertIn("writes a reviewed payload to upload_config.json", text)
+        self.assertIn("writes its validated networks dataset to upload_config.json", text)
+        self.assertIn("Destination selection", text)
         self.assertIn("No configuration will be sent to Mist", text)
         self.assertNotIn("NON-PRODUCTION", text)
 
@@ -66,7 +67,7 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("Read-only operations", text)
         self.assertIn("Configuration preparation (no API changes)", text)
         self.assertIn("Configuration changes", text)
-        self.assertIn("Prepare missing VLANs in upload_config.json", text)
+        self.assertIn("Create VLAN source dataset in upload_config.json", text)
         self.assertNotIn("NON-PRODUCTION", text)
         self.assertIn("[DANGER]", text)
         self.assertNotIn("Validate .env", text)

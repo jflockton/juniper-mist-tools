@@ -116,146 +116,98 @@ class VlanPlanningTests(unittest.TestCase):
 
 
 class VlanWorkflowTests(unittest.TestCase):
-    def test_target_metadata_rejects_a_different_upload_payload(self):
+    def test_source_metadata_rejects_a_different_upload_dataset(self):
         payload = {"networks": {"new": network(20)}}
         metadata = {
             "payload_sha256": "not-the-current-payload-hash",
-            "target": {
+            "kind": "vlan_source_dataset",
+            "source": {
                 "site_id": "site-a",
-                "device_id": "destination-id",
-                "device_name": "Destination",
+                "device_id": "source-id",
+                "device_name": "Source",
             },
-            "expected_destination_networks": {},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
-            target_path = Path(temp_dir) / "upload_config.target.json"
-            target_path.write_text(json.dumps(metadata), encoding="utf-8")
+            metadata_path = Path(temp_dir) / "upload_config.meta.json"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "does not match"):
-                interactive_api.load_upload_target_metadata(payload, target_path)
+                interactive_api.load_upload_metadata(payload, metadata_path)
 
-    def test_workflow_writes_target_bound_merged_payload_without_put(self):
-        sites = [{"id": "site-a", "name": "Site A"}]
+    def test_option_three_writes_source_dataset_without_destination(self):
+        source_site = {"id": "site-a", "name": "Site A"}
         source_device = {"id": "source-id", "name": "Source"}
-        destination_device = {"id": "destination-id", "name": "Destination"}
         source_config = {
             "id": "source-id",
             "name": "Source",
-            "networks": {"new": network(20)},
-        }
-        destination_config = {
-            "id": "destination-id",
-            "name": "Destination",
-            "networks": {"local": network(10)},
+            "networks": {"users": network(20), "voice": network(30)},
         }
         with tempfile.TemporaryDirectory() as temp_dir:
             upload_path = Path(temp_dir) / "upload_config.json"
-            target_path = Path(temp_dir) / "upload_config.target.json"
+            metadata_path = Path(temp_dir) / "upload_config.meta.json"
             with (
                 patch.object(
                     interactive_api,
-                    "select_destination_switch",
-                    return_value=(sites[0], destination_device),
-                ),
-                patch.object(
-                    interactive_api,
                     "get_device_info",
-                    side_effect=[source_config, destination_config, destination_config],
+                    return_value=source_config,
                 ),
                 patch.object(interactive_api, "UPLOAD_CONFIG_FILE", upload_path),
-                patch.object(interactive_api, "UPLOAD_TARGET_FILE", target_path),
-                patch("builtins.input", return_value="Destination"),
+                patch.object(interactive_api, "UPLOAD_METADATA_FILE", metadata_path),
+                patch("builtins.input", return_value="Source"),
                 redirect_stdout(StringIO()) as output,
             ):
-                interactive_api.prepare_missing_vlans(sites, sites[0], source_device)
+                interactive_api.prepare_vlan_dataset(source_site, source_device)
 
             payload = json.loads(upload_path.read_text(encoding="utf-8"))
-            metadata = json.loads(target_path.read_text(encoding="utf-8"))
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 
-        self.assertEqual(
-            payload,
-            {"networks": {"local": network(10), "new": network(20)}},
-        )
-        self.assertEqual(metadata["target"]["device_id"], "destination-id")
+        self.assertEqual(payload, {"networks": source_config["networks"]})
+        self.assertEqual(metadata["kind"], "vlan_source_dataset")
+        self.assertEqual(metadata["source"]["device_id"], "source-id")
         self.assertEqual(
             metadata["payload_sha256"], interactive_api._payload_sha256(payload)
         )
-        self.assertIn("will not send any configuration to Mist", output.getvalue())
+        self.assertIn("destination will be selected", output.getvalue().casefold())
         self.assertNotIn("PUT accepted", output.getvalue())
 
-    def test_workflow_aborts_if_destination_changes_after_preview(self):
+    def test_option_four_compares_destination_and_builds_safe_merged_payload(self):
         sites = [{"id": "site-a", "name": "Site A"}]
-        source_device = {"id": "source-id", "name": "Source"}
-        destination_device = {"id": "destination-id", "name": "Destination"}
-        source_config = {
-            "name": "Source",
-            "networks": {"new": network(20)},
+        source_payload = {"networks": {"new": network(20)}}
+        metadata = {
+            "version": 1,
+            "kind": "vlan_source_dataset",
+            "payload_sha256": interactive_api._payload_sha256(source_payload),
+            "source": {
+                "site_id": "site-a",
+                "site_name": "Site A",
+                "device_id": "source-id",
+                "device_name": "Source",
+            },
         }
+        destination_device = {"id": "destination-id", "name": "Destination"}
         destination_config = {
             "name": "Destination",
             "networks": {"local": network(10)},
         }
-        changed_destination = {
-            "name": "Destination",
-            "networks": {"local": network(10), "someone-else": network(30)},
-        }
         with tempfile.TemporaryDirectory() as temp_dir:
             upload_path = Path(temp_dir) / "upload_config.json"
-            target_path = Path(temp_dir) / "upload_config.target.json"
+            metadata_path = Path(temp_dir) / "upload_config.meta.json"
+            upload_path.write_text(json.dumps(source_payload), encoding="utf-8")
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
             with (
+                patch.object(interactive_api, "UPLOAD_CONFIG_FILE", upload_path),
+                patch.object(interactive_api, "UPLOAD_METADATA_FILE", metadata_path),
+                patch.object(interactive_api, "ensure_client", return_value=object()),
+                patch.object(interactive_api, "load_sites_for_action", return_value=sites),
                 patch.object(
                     interactive_api,
                     "select_destination_switch",
                     return_value=(sites[0], destination_device),
                 ),
                 patch.object(
-                    interactive_api,
-                    "get_device_info",
-                    side_effect=[source_config, destination_config, changed_destination],
-                ),
-                patch.object(interactive_api, "UPLOAD_CONFIG_FILE", upload_path),
-                patch.object(interactive_api, "UPLOAD_TARGET_FILE", target_path),
-                patch("builtins.input", return_value="Destination"),
-                redirect_stdout(StringIO()) as output,
-            ):
-                interactive_api.prepare_missing_vlans(sites, sites[0], source_device)
-
-            self.assertFalse(upload_path.exists())
-            self.assertFalse(target_path.exists())
-        self.assertIn("destination networks changed", output.getvalue())
-
-    def test_prepared_upload_aborts_if_target_changes_before_option_four(self):
-        payload = {"networks": {"local": network(10), "new": network(20)}}
-        metadata = {
-            "version": 1,
-            "payload_sha256": interactive_api._payload_sha256(payload),
-            "target": {
-                "site_id": "site-a",
-                "site_name": "Site A",
-                "device_id": "destination-id",
-                "device_name": "Destination",
-            },
-            "expected_destination_networks": {"local": network(10)},
-        }
-        changed_config = {
-            "name": "Destination",
-            "networks": {"local": network(10), "someone-else": network(30)},
-        }
-        with tempfile.TemporaryDirectory() as temp_dir:
-            upload_path = Path(temp_dir) / "upload_config.json"
-            target_path = Path(temp_dir) / "upload_config.target.json"
-            upload_path.write_text(json.dumps(payload), encoding="utf-8")
-            target_path.write_text(json.dumps(metadata), encoding="utf-8")
-            with (
-                patch.object(interactive_api, "UPLOAD_CONFIG_FILE", upload_path),
-                patch.object(interactive_api, "UPLOAD_TARGET_FILE", target_path),
-                patch.object(interactive_api, "ensure_client", return_value=object()),
-                patch.object(
-                    interactive_api,
-                    "load_sites_for_action",
-                    return_value=[{"id": "site-a", "name": "Site A"}],
+                    interactive_api, "get_device_info", return_value=destination_config
                 ),
                 patch.object(
-                    interactive_api, "get_device_info", return_value=changed_config
+                    interactive_api, "save_device_config", return_value="snapshot.log"
                 ),
                 patch.object(interactive_api, "upload_config_with_preview") as upload,
                 patch("builtins.input", return_value="APPLY CUSTOM CONFIG"),
@@ -263,8 +215,47 @@ class VlanWorkflowTests(unittest.TestCase):
             ):
                 interactive_api.run_custom_upload_action()
 
-        upload.assert_not_called()
-        self.assertIn("target networks changed", output.getvalue())
+        upload.assert_called_once_with(
+            "site-a",
+            "destination-id",
+            destination_config,
+            upload_data={
+                "networks": {"local": network(10), "new": network(20)}
+            },
+            expected_networks={"local": network(10)},
+        )
+        self.assertIn("Missing / to add:     1", output.getvalue())
+
+    def test_vlan_upload_aborts_if_destination_changes_after_comparison(self):
+        upload_data = {
+            "networks": {"local": network(10), "new": network(20)}
+        }
+        current_config = {
+            "name": "Destination",
+            "networks": {"local": network(10)},
+        }
+        changed_config = {
+            "name": "Destination",
+            "networks": {"local": network(10), "someone-else": network(30)},
+        }
+        with (
+            patch.object(interactive_api, "get_device_info", return_value=changed_config),
+            patch.object(interactive_api, "save_timestamped_backup") as backup,
+            patch.object(interactive_api, "get_client") as client,
+            patch("builtins.input", return_value="Destination"),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.upload_config_with_preview(
+                "site-a",
+                "destination-id",
+                current_config,
+                upload_data=upload_data,
+                expected_networks={"local": network(10)},
+            )
+
+        backup.assert_not_called()
+        client.assert_not_called()
+        self.assertIn("destination networks changed", output.getvalue())
 
 
 if __name__ == "__main__":

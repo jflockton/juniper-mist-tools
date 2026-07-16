@@ -201,7 +201,7 @@ Read-only operations
   2: Open read-only device tools
 
 Configuration preparation (no API changes)
-  3: Prepare missing VLANs in upload_config.json
+  3: Create VLAN source dataset in upload_config.json
 
 Configuration changes
   4: Apply upload_config.json to one switch [DANGER]
@@ -242,7 +242,7 @@ To use this feature:
 
 1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
-3. Remove a stale `upload_config.target.json` if this is a manually managed payload.
+3. Remove a stale `upload_config.meta.json` if this is a manually managed payload.
 4. Choose option `4` and type `APPLY CUSTOM CONFIG` at the danger gate.
 5. Select the intended site and switch carefully.
 6. Review the unified dry-run diff limited to the payload fields.
@@ -272,15 +272,21 @@ Notes:
 - The export mirrors the portal's Wired Clients page (data comes from the Mist `wired_clients/search` endpoint).
 - Repeated exports never silently overwrite a CSV; a numeric suffix is added if a timestamped name already exists.
 
-## Prepare missing VLANs
+## Create a VLAN source dataset
 
 Top-level option `3` is a preparation workflow. It performs read-only Mist API calls
-to collect the selected source and destination switch configurations, compares their
-`networks` objects, and writes a proposed payload to the ignored local file
-`upload_config.json`. **Option 3 never sends a PUT or changes a Mist device.**
+to collect one selected source switch's validated `networks` dataset and writes it to
+the ignored local file `upload_config.json`. **Option 3 does not ask for a destination,
+send a PUT, or change a Mist device.**
 
-The selected switch becomes the source. The tool then prompts for a destination site
-and switch, so a payload can be prepared within one site or across sites.
+The operator confirms the source switch name before the dataset is created or an
+existing upload file is replaced. Ignored `upload_config.meta.json` records the source
+identity and dataset hash. The destination is selected only after entering dangerous
+option `4`.
+
+When option `4` recognises a VLAN source dataset, it asks for the destination site and
+switch, reads that destination's current networks, and then applies these comparison
+rules:
 
 The comparison uses both the network name and `vlan_id`:
 
@@ -291,15 +297,13 @@ The comparison uses both the network name and `vlan_id`:
 - Case-insensitive name collisions and duplicate source VLAN IDs are conflicts and
   are skipped.
 
-The utility prints a summary plus an additions-only JSON diff. If there are safe
-additions, the operator must type the destination switch name exactly before the
-local file is created or replaced.
+Option `4` prints a summary plus an additions-only JSON diff. If there are no safe
+additions, nothing is sent to Mist.
 
 Mist `PUT` semantics require special care: a nested object included in a request
 replaces that object in its entirety. Sending only the missing entries inside
-`networks` could therefore remove the destination's existing networks. The prepared
-file therefore contains exactly one top-level field whose value is the complete safe
-merge:
+`networks` could therefore remove the destination's existing networks. The source
+dataset is never sent directly. Option `4` constructs this final API payload in memory:
 
 ```json
 {
@@ -310,15 +314,10 @@ merge:
 }
 ```
 
-Immediately before writing the files, option `3` reads the destination again and
-aborts if its networks changed after the preview. It also creates the ignored
-`upload_config.target.json`, which binds the payload hash to the intended site,
-switch, and destination-network snapshot.
-
-If option `4` later loads this prepared payload, it uses the bound target and aborts
-before PUT if either the payload was edited/replaced or the target networks changed
-after preparation. Option `4` still displays the danger gate, dry-run diff, exact
-switch-name confirmation, timestamped backup, and post-PUT verification. See Juniper's
+Option `4` verifies the dataset hash, displays the comparison and final field-limited
+PUT preview, requires the exact destination switch name, then reads the destination
+again and aborts if its networks changed during review. It retains the timestamped
+backup and post-PUT verification. See Juniper's
 [RESTful API overview](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/restful-api-overview.html)
 and [Update Site Device API reference](https://www.juniper.net/documentation/us/en/software/mist/api/http/api/sites/devices/update-site-device).
 
@@ -333,8 +332,8 @@ access:
 
 The 53 tests cover site-key generation, pagination and cursor safeguards, response
 mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
-classification, full-map merge construction, target binding, concurrent-change
-aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
+classification, source-dataset hashing, destination-time full-map construction,
+concurrent-change aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
 separation, all-device bulk export, token-redaction behaviour, and protection against
 stale environment tokens masking edits to `.env`.
 
@@ -412,7 +411,7 @@ site_codes.env
 outputs/
 backups/
 upload_config.json
-upload_config.target.json
+upload_config.meta.json
 __pycache__/
 ```
 

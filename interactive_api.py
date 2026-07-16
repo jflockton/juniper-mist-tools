@@ -24,7 +24,7 @@ SITE_CODES_FILE = BASE_DIR / "site_codes.env"
 OUTPUT_DIR = BASE_DIR / "outputs"
 BACKUP_DIR = BASE_DIR / "backups"
 UPLOAD_CONFIG_FILE = BASE_DIR / "upload_config.json"
-UPLOAD_TARGET_FILE = BASE_DIR / "upload_config.target.json"
+UPLOAD_METADATA_FILE = BASE_DIR / "upload_config.meta.json"
 REQUEST_TIMEOUT = 30
 
 _CLIENT = None
@@ -608,35 +608,40 @@ def _write_json_atomic(path, data):
     temporary.replace(path)
 
 
-def load_upload_target_metadata(payload, path=None):
-    """Load optional target binding created by the VLAN preparation workflow."""
-    path = path or UPLOAD_TARGET_FILE
+def load_upload_metadata(payload, path=None):
+    """Load optional metadata identifying a prepared VLAN source dataset."""
+    path = path or UPLOAD_METADATA_FILE
     if not path.exists():
         return None
     try:
         metadata = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        raise RuntimeError(f"Target metadata is invalid: {error}") from error
+        raise RuntimeError(f"Upload metadata is invalid: {error}") from error
     if not isinstance(metadata, dict):
-        raise RuntimeError("Target metadata JSON is not an object.")
+        raise RuntimeError("Upload metadata JSON is not an object.")
     if metadata.get("payload_sha256") != _payload_sha256(payload):
         raise RuntimeError(
-            "upload_config.target.json does not match upload_config.json. "
-            "Run VLAN preparation again or remove the stale target file for a "
+            "upload_config.meta.json does not match upload_config.json. "
+            "Run VLAN preparation again or remove the stale metadata file for a "
             "manually managed payload."
         )
-    target = metadata.get("target")
-    expected_networks = metadata.get("expected_destination_networks")
-    if not isinstance(target, dict) or not all(
-        target.get(key) for key in ("site_id", "device_id", "device_name")
+    if metadata.get("kind") != "vlan_source_dataset":
+        raise RuntimeError("Upload metadata has an unsupported dataset type.")
+    source = metadata.get("source")
+    if not isinstance(source, dict) or not all(
+        source.get(key) for key in ("site_id", "device_id", "device_name")
     ):
-        raise RuntimeError("Target metadata is missing the destination identity.")
-    if not isinstance(expected_networks, dict):
-        raise RuntimeError("Target metadata is missing the destination network snapshot.")
+        raise RuntimeError("Upload metadata is missing the source identity.")
     return metadata
 
 
-def upload_config_with_preview(site_id, device_id, current_config, upload_data=None):
+def upload_config_with_preview(
+    site_id,
+    device_id,
+    current_config,
+    upload_data=None,
+    expected_networks=None,
+):
     """Preview, confirm, back up, PUT, then verify a partial config payload."""
     if upload_data is None:
         try:
@@ -661,7 +666,17 @@ def upload_config_with_preview(site_id, device_id, current_config, upload_data=N
         return
 
     try:
-        backup_path = save_timestamped_backup(current_config)
+        backup_config = current_config
+        if expected_networks is not None:
+            backup_config = get_device_info(site_id, device_id)
+            latest_networks = extract_networks(backup_config, "current target")
+            if latest_networks != expected_networks:
+                print(
+                    "Upload aborted: the destination networks changed after the "
+                    "comparison. Run option 4 again."
+                )
+                return
+        backup_path = save_timestamped_backup(backup_config)
         print(f"Pre-change backup saved to {backup_path}")
         path = f"/api/v1/sites/{site_id}/devices/{device_id}"
         get_client().put_json(path, upload_data)
@@ -753,7 +768,7 @@ def select_destination_switch(sites, source_site, source_device):
         marked_site_id=source_site["id"],
     )
     if destination_site is None:
-        print("VLAN preparation cancelled.")
+        print("Destination selection cancelled.")
         return None, None
     excluded_id = (
         source_device.get("id")
@@ -767,7 +782,7 @@ def select_destination_switch(sites, source_site, source_device):
         excluded_device_id=excluded_id,
     )
     if destination_device is None:
-        print("VLAN preparation cancelled.")
+        print("Destination selection cancelled.")
         return None, None
     return destination_site, destination_device
 
@@ -799,75 +814,41 @@ def print_network_merge_plan(plan, source_count, destination_count):
         print(json.dumps({"networks": plan.additions}, indent=2, sort_keys=True))
 
 
-def prepare_missing_vlans(sites, source_site, source_device):
-    """Prepare only absent, non-conflicting networks for a later reviewed upload."""
-    try:
-        destination_site, destination_device = select_destination_switch(
-            sites, source_site, source_device
-        )
-    except Exception as error:
-        print(f"Failed to list destination switches: {error}")
-        return
-    if destination_device is None:
-        return
-
+def prepare_vlan_dataset(source_site, source_device):
+    """Write one source switch's validated networks as a local upload dataset."""
     source_name = source_device.get("name") or "Unnamed source"
-    destination_name = destination_device.get("name") or "Unnamed destination"
-    print(f"\nComparing VLANs: '{source_name}' -> '{destination_name}'...")
+    print(f"\nCollecting VLAN dataset from '{source_name}'...")
 
     try:
         source_config = get_device_info(source_site["id"], source_device["id"])
-        destination_config = get_device_info(
-            destination_site["id"], destination_device["id"]
-        )
         source_networks = extract_networks(source_config, "source")
-        destination_networks = extract_networks(destination_config, "destination")
-        plan = plan_network_merge(source_networks, destination_networks)
     except (requests.RequestException, RuntimeError, ValueError) as error:
-        print(f"VLAN comparison failed: {error}")
+        print(f"VLAN dataset collection failed: {error}")
         return
 
-    print_network_merge_plan(plan, len(source_networks), len(destination_networks))
-    if not plan.additions:
-        print("\nNo safe missing VLANs were found. No upload file was created.")
-        if UPLOAD_CONFIG_FILE.exists():
-            print(
-                f"Existing {UPLOAD_CONFIG_FILE} was left unchanged and does not "
-                "represent this comparison."
-            )
+    if not source_networks:
+        print("The selected source switch has no networks. No upload file was created.")
         return
 
+    payload = {"networks": source_networks}
+    print(f"Source dataset contains {len(source_networks)} network(s).")
     print(
-        "\nMist replaces nested objects supplied in a PUT, so upload_config.json "
-        "must contain the complete destination networks map plus only the safe "
-        "additions shown above. No other device fields will be written to the file."
+        "The destination will be selected and compared later in menu option 4. "
+        "This file is a source dataset and will not be sent directly to Mist."
     )
-    print("This preparation step will not send any configuration to Mist.")
     if UPLOAD_CONFIG_FILE.exists():
         print(f"Existing file will be replaced: {UPLOAD_CONFIG_FILE}")
     confirmation = input(
-        f"\nType the destination switch name '{destination_name}' to create the file: "
+        f"\nType the source switch name '{source_name}' to create the dataset: "
     ).strip()
-    if confirmation != destination_name:
-        print("VLAN preparation cancelled: destination name did not match.")
+    if confirmation != source_name:
+        print("VLAN dataset preparation cancelled: source name did not match.")
         return
 
     try:
-        fresh_destination = get_device_info(
-            destination_site["id"], destination_device["id"]
-        )
-        fresh_networks = extract_networks(fresh_destination, "destination")
-        if fresh_networks != destination_networks:
-            print(
-                "VLAN preparation aborted: the destination networks changed during the "
-                "preview. Run the comparison again."
-            )
-            return
-
-        merged_networks = build_merged_networks(fresh_networks, plan.additions)
-        payload = {"networks": merged_networks}
         metadata = {
             "version": 1,
+            "kind": "vlan_source_dataset",
             "payload_sha256": _payload_sha256(payload),
             "source": {
                 "site_id": source_site["id"],
@@ -875,26 +856,18 @@ def prepare_missing_vlans(sites, source_site, source_device):
                 "device_id": source_device["id"],
                 "device_name": source_name,
             },
-            "target": {
-                "site_id": destination_site["id"],
-                "site_name": destination_site.get("name", ""),
-                "device_id": destination_device["id"],
-                "device_name": destination_name,
-            },
-            "expected_destination_networks": fresh_networks,
         }
-        _write_json_atomic(UPLOAD_TARGET_FILE, metadata)
+        _write_json_atomic(UPLOAD_METADATA_FILE, metadata)
         _write_json_atomic(UPLOAD_CONFIG_FILE, payload)
         print(
-            f"Prepared {len(plan.additions)} missing network(s) in "
-            f"{UPLOAD_CONFIG_FILE}."
+            f"Source VLAN dataset written to {UPLOAD_CONFIG_FILE}."
         )
         print(
-            f"Target binding saved to {UPLOAD_TARGET_FILE}. Review the JSON, then "
-            "use menu option 4 if the change is approved."
+            f"Dataset metadata written to {UPLOAD_METADATA_FILE}. Review the JSON, "
+            "then use menu option 4 to select and compare a destination."
         )
     except (OSError, RuntimeError, ValueError) as error:
-        print(f"VLAN preparation failed: {error}")
+        print(f"VLAN dataset preparation failed: {error}")
 
 
 def load_sites_for_action():
@@ -958,16 +931,17 @@ def run_device_tools_action():
 
 
 def run_vlan_preparation_action():
-    """Prepare a target-bound VLAN payload without changing Mist configuration."""
+    """Capture one source switch's VLAN dataset without selecting a destination."""
     if ensure_client() is None:
         return
 
-    print("\nPrepare missing VLAN configuration")
+    print("\nCreate VLAN source dataset")
     print("-" * 40)
     print(
-        "This action reads source and destination switch configurations, compares "
-        "their networks, and writes a reviewed payload to upload_config.json."
+        "This action reads one source switch and writes its validated networks "
+        "dataset to upload_config.json."
     )
+    print("Destination selection and missing-VLAN comparison happen in option 4.")
     print("No configuration will be sent to Mist by this option.")
 
     sites = load_sites_for_action()
@@ -989,7 +963,7 @@ def run_vlan_preparation_action():
         return
     if source_device is None:
         return
-    prepare_missing_vlans(sites, source_site, source_device)
+    prepare_vlan_dataset(source_site, source_device)
 
 
 def run_custom_upload_action():
@@ -1012,7 +986,7 @@ def run_custom_upload_action():
 
     try:
         upload_data = load_upload_payload()
-        target_metadata = load_upload_target_metadata(upload_data)
+        upload_metadata = load_upload_metadata(upload_data)
     except (OSError, RuntimeError) as error:
         print(f"\nUpload aborted: {error}")
         return
@@ -1020,20 +994,30 @@ def run_custom_upload_action():
     sites = load_sites_for_action()
     if not sites:
         return
-    if target_metadata:
-        target = target_metadata["target"]
-        site = next(
-            (item for item in sites if item["id"] == target["site_id"]), None
-        )
-        if site is None:
-            print("Upload aborted: the prepared target site is not in the catalogue.")
-            return
-        device = {"id": target["device_id"], "name": target["device_name"]}
+    if upload_metadata:
+        source = upload_metadata["source"]
+        source_site = {
+            "id": source["site_id"],
+            "name": source.get("site_name") or "Prepared source site",
+        }
+        source_device = {
+            "id": source["device_id"],
+            "name": source["device_name"],
+        }
         print(
-            "\nPrepared VLAN payload target:\n"
-            f"  Site:   {target.get('site_name') or site['name']}\n"
-            f"  Switch: {target['device_name']}"
+            "\nPrepared VLAN source dataset:\n"
+            f"  Site:   {source_site['name']}\n"
+            f"  Switch: {source_device['name']}"
         )
+        try:
+            site, device = select_destination_switch(
+                sites, source_site, source_device
+            )
+        except Exception as error:
+            print(f"Failed to list destination switches: {error}")
+            return
+        if device is None:
+            return
     else:
         try:
             site = select_site(sites, "Target sites", "Select the target site: ")
@@ -1048,21 +1032,47 @@ def run_custom_upload_action():
 
     try:
         current_config = get_device_info(site["id"], device["id"])
-        if target_metadata:
-            current_networks = extract_networks(current_config, "current target")
-            if current_networks != target_metadata["expected_destination_networks"]:
+        effective_upload = upload_data
+        expected_networks = None
+        if upload_metadata:
+            source_networks = extract_networks(
+                upload_data, "prepared source dataset"
+            )
+            destination_networks = extract_networks(
+                current_config, "destination"
+            )
+            plan = plan_network_merge(source_networks, destination_networks)
+            print_network_merge_plan(
+                plan, len(source_networks), len(destination_networks)
+            )
+            if not plan.additions:
                 print(
-                    "Upload aborted: the target networks changed after the VLAN "
-                    "payload was prepared. Run menu option 3 again."
+                    "\nNo safe missing VLANs were found for this destination. "
+                    "Nothing will be sent to Mist."
                 )
                 return
+            effective_upload = {
+                "networks": build_merged_networks(
+                    destination_networks, plan.additions
+                )
+            }
+            expected_networks = destination_networks
+            print(
+                "\nThe PUT preview will contain the complete destination networks "
+                "map plus only the safe additions shown above. Existing destination "
+                "networks are preserved in the payload."
+            )
         snapshot = save_device_config(current_config)
         print(f"Current target configuration saved to {snapshot}")
     except Exception as error:
         print(f"Could not read and save the target configuration: {error}")
         return
     upload_config_with_preview(
-        site["id"], device["id"], current_config, upload_data=upload_data
+        site["id"],
+        device["id"],
+        current_config,
+        upload_data=effective_upload,
+        expected_networks=expected_networks,
     )
 
 
@@ -1089,7 +1099,7 @@ def print_main_menu(sites):
     print("  1: Export all device configurations to outputs/")
     print("  2: Open read-only device tools")
     print("\nConfiguration preparation (no API changes)")
-    print("  3: Prepare missing VLANs in upload_config.json")
+    print("  3: Create VLAN source dataset in upload_config.json")
     print("\nConfiguration changes")
     print("  4: Apply upload_config.json to one switch [DANGER]")
     print("\n  0: Exit")
