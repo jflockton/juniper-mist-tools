@@ -279,10 +279,11 @@ to collect one selected source switch's validated `networks` dataset and writes 
 the ignored local file `upload_config.json`. **Option 3 does not ask for a destination,
 send a PUT, or change a Mist device.**
 
-The operator confirms the source switch name before the dataset is created or an
-existing upload file is replaced. Ignored `upload_config.meta.json` records the source
-identity and dataset hash. The destination is selected only after entering dangerous
-option `4`.
+After source selection, the tool fetches the configuration into memory, extracts and
+validates `networks`, then atomically creates or replaces `upload_config.json` in the
+form `{"networks": {...}}` without another confirmation prompt. Ignored
+`upload_config.meta.json` records the source identity and dataset hash. The destination
+is selected only after entering dangerous option `4`.
 
 When option `4` recognises a VLAN source dataset, it asks for the destination site and
 switch, reads that destination's current networks, and then applies these comparison

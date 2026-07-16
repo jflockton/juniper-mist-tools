@@ -144,6 +144,7 @@ class VlanWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             upload_path = Path(temp_dir) / "upload_config.json"
             metadata_path = Path(temp_dir) / "upload_config.meta.json"
+            upload_path.write_text('{"old": true}', encoding="utf-8")
             with (
                 patch.object(
                     interactive_api,
@@ -152,7 +153,7 @@ class VlanWorkflowTests(unittest.TestCase):
                 ),
                 patch.object(interactive_api, "UPLOAD_CONFIG_FILE", upload_path),
                 patch.object(interactive_api, "UPLOAD_METADATA_FILE", metadata_path),
-                patch("builtins.input", return_value="Source"),
+                patch("builtins.input", side_effect=AssertionError("unexpected prompt")),
                 redirect_stdout(StringIO()) as output,
             ):
                 interactive_api.prepare_vlan_dataset(source_site, source_device)

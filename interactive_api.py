@@ -838,12 +838,6 @@ def prepare_vlan_dataset(source_site, source_device):
     )
     if UPLOAD_CONFIG_FILE.exists():
         print(f"Existing file will be replaced: {UPLOAD_CONFIG_FILE}")
-    confirmation = input(
-        f"\nType the source switch name '{source_name}' to create the dataset: "
-    ).strip()
-    if confirmation != source_name:
-        print("VLAN dataset preparation cancelled: source name did not match.")
-        return
 
     try:
         metadata = {
@@ -860,7 +854,8 @@ def prepare_vlan_dataset(source_site, source_device):
         _write_json_atomic(UPLOAD_METADATA_FILE, metadata)
         _write_json_atomic(UPLOAD_CONFIG_FILE, payload)
         print(
-            f"Source VLAN dataset written to {UPLOAD_CONFIG_FILE}."
+            f"Source VLAN dataset written to {UPLOAD_CONFIG_FILE} as "
+            "a top-level 'networks' JSON object."
         )
         print(
             f"Dataset metadata written to {UPLOAD_METADATA_FILE}. Review the JSON, "
