@@ -1,9 +1,10 @@
 # Mist Switch Configuration Utility
 
-This project provides two Python scripts for working with Juniper Mist switch configurations:
+This project provides a small Python utility for working with Juniper Mist switch configurations and wired-client inventory:
 
 - `get_site_ids.py` retrieves all sites in a Mist organisation and generates `site_codes.env`.
-- `interactive_api.py` lets an operator select a site and switch, download switch configuration, export configurations for every switch, or optionally upload JSON configuration to one switch.
+- `interactive_api.py` lets an operator select a site and switch, download switch configuration, export wired clients to CSV, safely copy missing VLANs to another switch, export configurations for every switch, or preview and optionally upload JSON configuration to one switch.
+- `mist_client.py` provides shared authentication, timeout, pagination-URL safety, and JSON handling for both scripts.
 
 There is no compilation or packaging step. Set up Python, install the dependencies, configure the Mist credentials, and run the scripts from the project directory.
 
@@ -19,7 +20,10 @@ There is no compilation or packaging step. Set up Python, install the dependenci
 | [Official Juniper reference URLs](#official-juniper-reference-urls) | Direct links to the relevant Juniper Mist documentation |
 | [3. Generate the site-code file](#3-generate-the-site-code-file) | Create or refresh `site_codes.env` |
 | [4. Run the interactive utility](#4-run-the-interactive-utility) | Select sites and switches or export all switch configurations |
-| [Optional configuration upload](#optional-configuration-upload) | Safely use `upload_config.json` |
+| [Optional configuration upload](#optional-configuration-upload) | Preview, back up, apply, and verify `upload_config.json` |
+| [Export wired clients to CSV](#export-wired-clients-to-csv) | Export the selected switch's wired-client inventory |
+| [Copy missing VLANs](#copy-missing-vlans) | Safely add absent source VLANs to another switch |
+| [Run the tests](#run-the-tests) | Run the offline mocked unit-test suite |
 | [Refreshing sites](#refreshing-sites) | Update local site IDs after Mist changes |
 | [VS Code](#vs-code) | Select the virtual environment and handle `.env` integration |
 | [Troubleshooting](#troubleshooting) | Resolve common setup, API, and connectivity problems |
@@ -41,11 +45,15 @@ Copy these files into a new project directory:
 ```text
 get_site_ids.py
 interactive_api.py
+mist_client.py
+vlan_copy.py
+requirements.txt
 .gitignore
-upload_config.json       # Optional; only needed for configuration uploads
+upload_config.example.json  # Safe template for optional configuration uploads
 ```
 
-Do not copy `.venv`, `.env`, `site_codes.env`, `outputs`, or `__pycache__` between environments. They should be created locally.
+Do not copy `.venv`, `.env`, `site_codes.env`, `outputs`, `backups`, or
+`__pycache__` between environments. They should be created locally.
 
 ## 1. Create a virtual environment
 
@@ -64,7 +72,7 @@ python -m venv .venv
 Install the required packages using the virtual environment directly:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install requests python-dotenv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 Using the interpreter directly avoids PowerShell activation-policy problems. To activate the environment instead, run:
@@ -83,9 +91,13 @@ Create a file named `.env` in the same directory as the Python scripts:
 API_URL=https://api.eu.mist.com
 MIST_API_KEY=replace-with-api-token
 ORG_ID=replace-with-organisation-id
+ENABLE_NON_PRODUCTION_VLAN_COPY=false
 ```
 
-`get_site_ids.py` requires all three values. `interactive_api.py` requires `API_URL` and `MIST_API_KEY`; it reads site IDs from `site_codes.env` rather than directly from `.env`.
+`get_site_ids.py` requires the first three values. `interactive_api.py` uses `ORG_ID`
+for its validation and site-catalogue refresh actions. VLAN copy is locked unless
+`ENABLE_NON_PRODUCTION_VLAN_COPY=true`; leave it false or absent on production
+workstations.
 
 ### Obtain the Mist API values
 
@@ -161,13 +173,41 @@ Run the utility from the project directory:
 .\.venv\Scripts\python.exe .\interactive_api.py
 ```
 
-The main menu provides these options:
+The top-level menu separates setup, read-only operations, and configuration changes:
 
-- Enter a site number to list its switches.
-- Enter `A` to download configurations for every switch in every listed site.
-- Enter `0` to exit.
+```text
+Welcome to the Securitas Juniper Mist API Tool
 
-After selecting a switch, its configuration is written as JSON to:
+Setup and validation
+  1: Validate .env settings, API token, and organisation access
+  2: Refresh the local Mist site catalogue
+
+Read-only operations
+  3: Export all switch configurations to outputs/
+  4: Open read-only device tools
+
+Configuration changes
+  5: Copy missing VLANs [NON-PRODUCTION ONLY]
+  6: Apply upload_config.json to one switch [DANGER]
+
+  0: Exit
+```
+
+Option `1` checks that `.env` exists and has the required values, calls
+`GET /api/v1/self` to validate the token, probes the configured organisation's site
+list, and reports whether the local catalogue is available. The token is never
+printed. Option `2` downloads every site and replaces `site_codes.env`.
+
+Option `3` exports all switch configurations. Option `4` asks for a site and switch,
+then offers only these read-only actions:
+
+```text
+1: Download this switch configuration
+2: Export wired clients to CSV
+0: Cancel
+```
+
+A single-switch configuration download is written as JSON to:
 
 ```text
 outputs/<switch-name>.log
@@ -177,31 +217,32 @@ The `outputs` directory is created automatically. Invalid filename characters ar
 
 ## Optional configuration upload
 
-After downloading one switch configuration, the utility asks whether to upload `upload_config.json` to that switch.
+Top-level option `6` previews and applies the partial JSON object in
+`upload_config.json` to one explicitly selected switch. It is intentionally separate
+from all download/read-only paths.
 
 To use this feature:
 
-1. Place `upload_config.json` in the project directory.
+1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
-3. Select the intended site and switch carefully.
-4. Answer `y` only after reviewing the file and selected device.
+3. Choose option `6` and type `APPLY CUSTOM CONFIG` at the danger gate.
+4. Select the intended site and switch carefully.
+5. Review the unified dry-run diff limited to the payload fields.
+6. Type the target switch name exactly to approve the PUT.
 
-Uploading performs a Mist API `PUT` against the selected switch and changes its configuration. Take a current configuration export first and test changes through the normal change-control process. Leave `upload_config.json` empty or answer `n` when only collecting configurations.
+Immediately before the PUT, the utility writes a timestamped copy of the target's
+current configuration to `backups/`. After the PUT, it reads the switch again and
+checks that every uploaded field matches the requested value. Both `backups/` and
+`upload_config.json` should be handled as sensitive operational data. Leave
+`upload_config.json` empty or answer `n` when only collecting configurations.
 
 ## Export wired clients to CSV
 
-After selecting a site and a switch, the utility presents an action menu:
+Read-only device-tool option `2` pulls every wired client seen on the selected
+switch/stack and writes them to:
 
 ```text
-1: Download switch configuration (JSON -> outputs/)
-2: Export wired clients (IP/MAC) to CSV -> outputs/
-0: Back to device list
-```
-
-Option `2` pulls every wired client seen on the selected switch/stack and writes them to:
-
-```text
-outputs/<site>_<switch>_wired_clients_<YYYYMMDD-HHMM>.csv
+outputs/<site>_<switch>_wired_clients_<YYYYMMDD-HHMMSS>.csv
 ```
 
 You are prompted for a lookback window in days (default `1`). Columns: `client_mac, ip, switch_name, port_id, vlan, manufacture, dhcp_hostname, last_seen_utc`.
@@ -211,6 +252,74 @@ Notes:
 - The client IP is only present where Mist has learned one (DHCP snooping or the switch ARP table), so the `ip` column is often blank — this is expected, not an error.
 - Rows are ordered by switch port (stack members grouped together).
 - The export mirrors the portal's Wired Clients page (data comes from the Mist `wired_clients/search` endpoint).
+- Repeated exports never silently overwrite a CSV; a numeric suffix is added if a timestamped name already exists.
+
+## Copy missing VLANs
+
+Top-level option `5` is disabled by default. To make it available for a controlled
+non-production test, set this explicitly and restart the tool:
+
+```env
+ENABLE_NON_PRODUCTION_VLAN_COPY=true
+```
+
+The tool then displays a prominent warning that VLAN configuration may be temporarily
+removed/reapplied while Mist processes the PUT, potentially interrupting switching
+and dropping traffic. It requires the exact phrase `NON-PRODUCTION VLAN COPY` before
+source selection. **Do not enable or use this action for production switches.**
+
+After the gate, the selected switch becomes the source. The tool prompts for a
+destination site and switch, so controlled copying can be performed within one site
+or across sites.
+
+The comparison uses both the network name and `vlan_id`:
+
+- An identical name and definition is already present and is skipped.
+- A missing name with an unused VLAN ID is safe and is proposed as an addition.
+- The same name with different settings is a conflict and is skipped.
+- A VLAN ID already used under another name is a conflict and is skipped.
+- Case-insensitive name collisions and duplicate source VLAN IDs are conflicts and
+  are skipped.
+
+The utility prints a summary plus an additions-only JSON diff. If there are safe
+additions, the operator must type the destination switch name exactly.
+
+Mist `PUT` semantics require special care: a nested object included in a request
+replaces that object in its entirety. Sending only the missing entries inside
+`networks` could therefore remove the destination's existing networks. The utility
+instead sends exactly one top-level field whose value is the complete safe merge:
+
+```json
+{
+  "networks": {
+    "<every existing destination network>": {},
+    "<safe missing source networks>": {}
+  }
+}
+```
+
+Immediately before the PUT, the utility reads the destination again and aborts if
+its networks changed after the preview. It saves a timestamped destination backup,
+applies the merged map, reads the device back, and verifies that every pre-existing
+network is unchanged and every proposed addition matches the source. No other device
+configuration fields are sent. See Juniper's
+[RESTful API overview](https://www.juniper.net/documentation/us/en/software/mist/automation-integration/topics/concept/restful-api-overview.html)
+and [Update Site Device API reference](https://www.juniper.net/documentation/us/en/software/mist/api/http/api/sites/devices/update-site-device).
+
+## Run the tests
+
+The test suite uses mocked Mist responses and does not require a token or network
+access:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+The 39 tests cover site-key generation, pagination and cursor safeguards, response
+mapping, CSV output, MAC handling, upload-payload/diff validation, VLAN conflict
+classification, full-map merge construction, concurrent-change aborts, and
+post-PUT preservation checks. Menu tests also enforce the default-disabled VLAN gate,
+the exact warning phrase, read-only/write separation, and token-redaction behaviour.
 
 ## Refreshing sites
 
@@ -270,6 +379,7 @@ The following files and directories should remain excluded from Git:
 .env
 site_codes.env
 outputs/
+backups/
 __pycache__/
 ```
 

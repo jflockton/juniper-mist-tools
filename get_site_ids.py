@@ -6,6 +6,8 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
+from mist_client import MistClient
+
 
 BASE_DIR = Path(__file__).resolve().parent
 OUTPUT_FILE = BASE_DIR / "site_codes.env"
@@ -29,25 +31,16 @@ def load_settings():
     return settings
 
 
-def get_all_sites(api_url, api_key, org_id):
-    url = f"{api_url.rstrip('/')}/api/v1/orgs/{org_id}/sites"
-    headers = {
-        "Authorization": f"Token {api_key}",
-        "Accept": "application/json",
-    }
+def get_all_sites(client, org_id):
+    path = f"/api/v1/orgs/{org_id}/sites"
     sites = []
     seen_site_ids = set()
     page = 1
 
     while True:
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"limit": PAGE_LIMIT, "page": page},
-            timeout=30,
+        page_sites = client.get_json(
+            path, params={"limit": PAGE_LIMIT, "page": page}
         )
-        response.raise_for_status()
-        page_sites = response.json()
         if not isinstance(page_sites, list):
             raise RuntimeError("Mist returned an unexpected response for the sites list")
 
@@ -58,14 +51,6 @@ def get_all_sites(api_url, api_key, org_id):
                 sites.append(site)
                 seen_site_ids.add(site_id)
                 new_site_count += 1
-
-        total_header = response.headers.get("X-Page-Total")
-        if total_header:
-            try:
-                if len(sites) >= int(total_header):
-                    break
-            except ValueError:
-                pass
 
         if len(page_sites) < PAGE_LIMIT or new_site_count == 0:
             break
@@ -108,11 +93,8 @@ def write_site_codes(sites):
 def main():
     try:
         settings = load_settings()
-        sites = get_all_sites(
-            settings["API_URL"],
-            settings["MIST_API_KEY"],
-            settings["ORG_ID"],
-        )
+        client = MistClient(settings["API_URL"], settings["MIST_API_KEY"])
+        sites = get_all_sites(client, settings["ORG_ID"])
         written_count = write_site_codes(sites)
         print(f"Saved {written_count} site IDs to {OUTPUT_FILE}")
     except requests.RequestException as error:

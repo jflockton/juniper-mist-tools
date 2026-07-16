@@ -1,8 +1,8 @@
 import csv
+import difflib
 import json
 import os
 import re
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,28 +10,85 @@ from pathlib import Path
 import requests
 from dotenv import dotenv_values, load_dotenv
 
+from get_site_ids import get_all_sites, write_site_codes
+from mist_client import MistClient
+from vlan_copy import (
+    build_merged_networks,
+    extract_networks,
+    plan_network_merge,
+    verify_network_merge,
+)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 SITE_CODES_FILE = BASE_DIR / "site_codes.env"
 OUTPUT_DIR = BASE_DIR / "outputs"
+BACKUP_DIR = BASE_DIR / "backups"
 UPLOAD_CONFIG_FILE = BASE_DIR / "upload_config.json"
 REQUEST_TIMEOUT = 30
 
-load_dotenv(BASE_DIR / ".env")
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+_CLIENT = None
+_SETTINGS = None
+VLAN_COPY_ENV_FLAG = "ENABLE_NON_PRODUCTION_VLAN_COPY"
+VLAN_COPY_ACKNOWLEDGEMENT = "NON-PRODUCTION VLAN COPY"
+CUSTOM_UPLOAD_ACKNOWLEDGEMENT = "APPLY CUSTOM CONFIG"
 
-API_URL = os.getenv("API_URL", "").strip()
-API_KEY = os.getenv("MIST_API_KEY", "").strip()
 
-missing_settings = [
-    name
-    for name, value in {"API_URL": API_URL, "MIST_API_KEY": API_KEY}.items()
-    if not value
-]
-if missing_settings:
-    raise RuntimeError(
-        f"Missing required value(s) in .env: {', '.join(missing_settings)}"
+def read_settings():
+    """Read settings for status display without requiring them to be complete."""
+    load_dotenv(BASE_DIR / ".env")
+    return {
+        "API_URL": os.getenv("API_URL", "").strip(),
+        "MIST_API_KEY": os.getenv("MIST_API_KEY", "").strip(),
+        "ORG_ID": os.getenv("ORG_ID", "").strip(),
+        VLAN_COPY_ENV_FLAG: os.getenv(VLAN_COPY_ENV_FLAG, "").strip(),
+    }
+
+
+def load_settings():
+    """Load and validate runtime settings without side effects at import time."""
+    settings = read_settings()
+    missing = [
+        name for name in ("API_URL", "MIST_API_KEY") if not settings[name]
+    ]
+    if missing:
+        raise RuntimeError(f"Missing required value(s) in .env: {', '.join(missing)}")
+    return settings
+
+
+def configure_client(settings=None):
+    """Create the shared Mist client used by interactive operations."""
+    global _CLIENT, _SETTINGS
+    settings = settings or load_settings()
+    _CLIENT = MistClient(
+        settings["API_URL"], settings["MIST_API_KEY"], timeout=REQUEST_TIMEOUT
     )
+    _SETTINGS = settings
+    return _CLIENT
+
+
+def get_client():
+    if _CLIENT is None:
+        raise RuntimeError("Mist API client has not been configured")
+    return _CLIENT
+
+
+def vlan_copy_enabled(settings=None):
+    settings = settings or read_settings()
+    value = settings.get(VLAN_COPY_ENV_FLAG, "").casefold()
+    return value in {"1", "true", "yes", "on"}
+
+
+def ensure_client():
+    """Return a configured client or explain how to repair local settings."""
+    if _CLIENT is not None:
+        return _CLIENT
+    try:
+        return configure_client()
+    except (RuntimeError, ValueError) as error:
+        print(f"\nAPI client is not ready: {error}")
+        print("Run menu option 1 to validate the local configuration.")
+        return None
 
 def get_sites():
     if not SITE_CODES_FILE.exists():
@@ -54,10 +111,102 @@ def get_sites():
 
     return sorted(sites, key=lambda site: site["name"].casefold())
 
+
+def validate_api_configuration():
+    """Validate local settings, token authentication, org access, and site cache."""
+    global _CLIENT, _SETTINGS
+    print("\nConfiguration and API validation")
+    print("-" * 40)
+
+    settings = read_settings()
+    env_exists = (BASE_DIR / ".env").exists()
+    print(f"[{'OK' if env_exists else 'FAIL'}] .env file: {BASE_DIR / '.env'}")
+
+    missing = [
+        name
+        for name in ("API_URL", "MIST_API_KEY", "ORG_ID")
+        if not settings.get(name)
+    ]
+    for name in ("API_URL", "MIST_API_KEY", "ORG_ID"):
+        state = "set" if settings.get(name) else "missing"
+        print(f"[{'OK' if state == 'set' else 'FAIL'}] {name}: {state}")
+    print(
+        f"[INFO] {VLAN_COPY_ENV_FLAG}: "
+        f"{'enabled' if vlan_copy_enabled(settings) else 'disabled (safe default)'}"
+    )
+    if missing:
+        print(f"\nValidation stopped. Missing: {', '.join(missing)}")
+        return False
+
+    try:
+        client = MistClient(
+            settings["API_URL"], settings["MIST_API_KEY"], timeout=REQUEST_TIMEOUT
+        )
+        identity = client.get_json("/api/v1/self")
+        if not isinstance(identity, dict):
+            raise RuntimeError("Mist returned an unexpected /self response")
+        print("[OK] API token authentication: accepted by Mist")
+
+        org_probe = client.get_json(
+            f"/api/v1/orgs/{settings['ORG_ID']}/sites",
+            params={"limit": 1, "page": 1},
+        )
+        if not isinstance(org_probe, list):
+            raise RuntimeError("Mist returned an unexpected organisation response")
+        print("[OK] Organisation access: site list is accessible")
+
+        _CLIENT = client
+        _SETTINGS = settings
+    except requests.HTTPError as error:
+        status = error.response.status_code if error.response is not None else "?"
+        print(f"[FAIL] Mist API validation returned HTTP {status}")
+        return False
+    except (requests.RequestException, RuntimeError, ValueError) as error:
+        print(f"[FAIL] Mist API validation failed: {error}")
+        return False
+
+    try:
+        local_sites = get_sites()
+        print(f"[OK] Local site catalogue: {len(local_sites)} site(s) available")
+    except RuntimeError as error:
+        print(f"[WARN] Local site catalogue: {error}")
+        print("       Run menu option 2 to download the organisation site list.")
+
+    print("\nValidation completed successfully. The API token itself was not displayed.")
+    return True
+
+
+def refresh_site_catalogue():
+    """Download all organisation sites and replace the local site_codes.env cache."""
+    client = ensure_client()
+    if client is None:
+        return False
+    settings = _SETTINGS or read_settings()
+    org_id = settings.get("ORG_ID", "")
+    if not org_id:
+        print("\nORG_ID is missing. Run menu option 1 after updating .env.")
+        return False
+
+    print("\nDownloading the organisation site catalogue...")
+    try:
+        sites = get_all_sites(client, org_id)
+        written = write_site_codes(sites)
+    except requests.HTTPError as error:
+        status = error.response.status_code if error.response is not None else "?"
+        print(f"Site catalogue refresh failed with HTTP {status}.")
+        return False
+    except (requests.RequestException, OSError, RuntimeError, ValueError) as error:
+        print(f"Site catalogue refresh failed: {error}")
+        return False
+
+    print(f"Site catalogue refreshed: {written} site(s) written to {SITE_CODES_FILE}")
+    return True
+
 def get_devices(site_id):
-    url = f"{API_URL.rstrip('/')}/api/v1/sites/{site_id}/devices"
-    headers = {"Authorization": f"Token {API_KEY}"}
+    path = f"/api/v1/sites/{site_id}/devices"
     all_switches = []
+    seen_device_ids = set()
+    seen_pages = set()
     page = 1
     while True:
         params = {
@@ -65,21 +214,39 @@ def get_devices(site_id):
             "limit": 300,
             "page": page
         }
-        response = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        switches = response.json()
+        switches = get_client().get_json(path, params=params)
+        if not isinstance(switches, list):
+            raise RuntimeError("Mist returned an unexpected response for the device list")
         if not switches:
             break
-        all_switches.extend(switches)
+        page_signature = json.dumps(switches, sort_keys=True, default=str)
+        if page_signature in seen_pages:
+            raise RuntimeError("Mist repeated a device-list page")
+        seen_pages.add(page_signature)
+        new_switches = []
+        for switch in switches:
+            if not isinstance(switch, dict):
+                raise RuntimeError("Mist returned an invalid device-list entry")
+            device_id = switch.get("id")
+            if device_id and device_id in seen_device_ids:
+                continue
+            new_switches.append(switch)
+            if device_id:
+                seen_device_ids.add(device_id)
+        if not new_switches:
+            break
+        all_switches.extend(new_switches)
+        if len(switches) < params["limit"]:
+            break
         page += 1
     return all_switches
 
 def get_device_info(site_id, device_id):
-    url = f"{API_URL.rstrip('/')}/api/v1/sites/{site_id}/devices/{device_id}"
-    headers = {"Authorization": f"Token {API_KEY}"}
-    response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    path = f"/api/v1/sites/{site_id}/devices/{device_id}"
+    device = get_client().get_json(path)
+    if not isinstance(device, dict):
+        raise RuntimeError("Mist returned an unexpected device response")
+    return device
 
 def save_device_config(device_info, used_filenames=None):
     device_name = str(device_info.get("name") or "unknown_device")
@@ -99,10 +266,11 @@ def save_device_config(device_info, used_filenames=None):
             filename_key = filename.casefold()
         used_filenames.add(filename_key)
 
-    filepath = os.path.join(OUTPUT_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as output_file:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    filepath = OUTPUT_DIR / filename
+    with filepath.open("w", encoding="utf-8") as output_file:
         json.dump(device_info, output_file, indent=4)
-    return filepath
+    return str(filepath)
 
 def export_all_switch_configs(sites):
     saved_count = 0
@@ -201,25 +369,31 @@ def get_wired_clients(site_id, start_epoch, end_epoch):
 
     Follows the response 'next' cursor (search_after paging) until exhausted.
     """
-    headers = {"Authorization": f"Token {API_KEY}"}
-    base = f"{API_URL.rstrip('/')}/api/v1"
-    path = f"/sites/{site_id}/wired_clients/search"
+    path = f"/api/v1/sites/{site_id}/wired_clients/search"
     params = {"start": int(start_epoch), "end": int(end_epoch), "limit": 1000}
 
     clients = []
+    seen_cursors = set()
     while True:
-        response = requests.get(
-            f"{base}{path}", headers=headers, params=params, timeout=REQUEST_TIMEOUT
-        )
-        response.raise_for_status()
-        payload = response.json()
-        clients.extend(payload.get("results", []))
+        payload = get_client().get_json(path, params=params)
+        if not isinstance(payload, dict):
+            raise RuntimeError("Mist returned an unexpected wired-client response")
+        results = payload.get("results", [])
+        if not isinstance(results, list) or not all(
+            isinstance(item, dict) for item in results
+        ):
+            raise RuntimeError("Mist returned invalid wired-client results")
+        clients.extend(results)
 
         next_cursor = payload.get("next")
         if not next_cursor:
             break
-        # 'next' is a full '/api/v1/...' path carrying its own query string.
-        path, params = next_cursor.replace("/api/v1", "", 1), {}
+        if not isinstance(next_cursor, str):
+            raise RuntimeError("Mist returned an invalid pagination cursor")
+        if next_cursor in seen_cursors:
+            raise RuntimeError("Mist repeated a pagination cursor")
+        seen_cursors.add(next_cursor)
+        path, params = next_cursor, None
 
     return clients
 
@@ -231,11 +405,15 @@ def wired_client_to_row(client, switch_name):
     hostname = client.get("last_hostname") or _first(client.get("hostname"))
     vlan = client.get("last_vlan")
     timestamp = client.get("timestamp")
-    last_seen = (
-        datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        if timestamp
-        else ""
-    )
+    if timestamp in (None, ""):
+        last_seen = ""
+    else:
+        try:
+            last_seen = datetime.fromtimestamp(
+                float(timestamp), timezone.utc
+            ).strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OverflowError, OSError):
+            last_seen = ""
     return {
         "client_mac": client.get("mac", ""),
         "ip": ip or "",
@@ -250,19 +428,24 @@ def wired_client_to_row(client, switch_name):
 
 def write_wired_clients_csv(site_name, scope_name, rows):
     """Write mapped rows to outputs/<site>_<scope>_wired_clients_<stamp>.csv."""
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
-    filename = (
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base_name = (
         f"{_safe_component(site_name)}_{_safe_component(scope_name)}"
-        f"_wired_clients_{stamp}.csv"
+        f"_wired_clients_{stamp}"
     )
-    filepath = os.path.join(OUTPUT_DIR, filename)
-    with open(filepath, "w", newline="", encoding="utf-8") as output_file:
+    filepath = OUTPUT_DIR / f"{base_name}.csv"
+    suffix = 2
+    while filepath.exists():
+        filepath = OUTPUT_DIR / f"{base_name}_{suffix}.csv"
+        suffix += 1
+    with filepath.open("w", newline="", encoding="utf-8") as output_file:
         writer = csv.DictWriter(
             output_file, fieldnames=WIRED_CLIENT_COLUMNS, extrasaction="ignore"
         )
         writer.writeheader()
         writer.writerows(rows)
-    return filepath
+    return str(filepath)
 
 
 def _prompt_lookback_days(default=1):
@@ -278,6 +461,16 @@ def _prompt_lookback_days(default=1):
     except ValueError:
         print(f"Invalid number of days; using {default}.")
         return default
+
+
+def wired_client_rows_for_device(clients, device_mac, device_name):
+    """Filter site results to one switch MAC and map them to CSV rows."""
+    normalised_device_mac = _normalise_mac(device_mac)
+    return [
+        wired_client_to_row(client, device_name)
+        for client in clients
+        if _normalise_mac(client.get("last_device_mac")) == normalised_device_mac
+    ]
 
 
 def export_wired_clients_for_device(site, device):
@@ -317,14 +510,20 @@ def export_wired_clients_for_device(site, device):
         print(f"Failed to fetch wired clients: {error}")
         return
 
-    rows = [
-        wired_client_to_row(client, device_name)
-        for client in all_clients
-        if _normalise_mac(client.get("last_device_mac")) == device_mac
-    ]
-    rows.sort(key=lambda row: (derive_fpc(row["port_id"]), row["port_id"], row["client_mac"]))
+    rows = wired_client_rows_for_device(all_clients, device_mac, device_name)
+    rows.sort(
+        key=lambda row: (
+            derive_fpc(row["port_id"]),
+            row["port_id"],
+            row["client_mac"],
+        )
+    )
 
-    filepath = write_wired_clients_csv(site_name, device_name, rows)
+    try:
+        filepath = write_wired_clients_csv(site_name, device_name, rows)
+    except OSError as error:
+        print(f"Failed to write the wired-client CSV: {error}")
+        return
     if rows:
         with_ip = sum(1 for row in rows if row["ip"])
         print(
@@ -337,8 +536,113 @@ def export_wired_clients_for_device(site, device):
         )
 
 
+def build_config_diff(current_config, proposed_changes):
+    """Return a unified diff limited to fields present in the proposed payload."""
+    current_subset = {
+        key: current_config.get(key) for key in sorted(proposed_changes)
+    }
+    proposed_subset = dict(current_subset)
+    proposed_subset.update(proposed_changes)
+    before = json.dumps(current_subset, indent=2, sort_keys=True).splitlines()
+    after = json.dumps(proposed_subset, indent=2, sort_keys=True).splitlines()
+    return "\n".join(
+        difflib.unified_diff(
+            before,
+            after,
+            fromfile="current target",
+            tofile="proposed target",
+            lineterm="",
+        )
+    )
+
+
+def save_timestamped_backup(device_info):
+    """Save the target's current configuration immediately before a PUT."""
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    device_name = _safe_component(device_info.get("name") or "unknown_device")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    filepath = BACKUP_DIR / f"{device_name}_{stamp}.json"
+    suffix = 2
+    while filepath.exists():
+        filepath = BACKUP_DIR / f"{device_name}_{stamp}_{suffix}.json"
+        suffix += 1
+    filepath.write_text(
+        json.dumps(device_info, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    return filepath
+
+
+def load_upload_payload(path=UPLOAD_CONFIG_FILE):
+    """Read and validate the optional partial device-configuration payload."""
+    if not path.exists():
+        raise RuntimeError("File 'upload_config.json' does not exist.")
+    if path.stat().st_size == 0:
+        raise RuntimeError("File 'upload_config.json' is empty.")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"File is not valid JSON: {error}") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("File JSON structure is not an object.")
+    if not payload:
+        raise RuntimeError("File JSON object contains no changes.")
+    return payload
+
+
+def upload_config_with_preview(site_id, device_id, current_config):
+    """Preview, confirm, back up, PUT, then verify a partial config payload."""
+    try:
+        upload_data = load_upload_payload()
+    except (OSError, RuntimeError) as error:
+        print(f"Upload aborted: {error}")
+        return
+
+    preview = build_config_diff(current_config, upload_data)
+    if not preview:
+        print("Upload aborted: the payload would not change the selected switch.")
+        return
+
+    device_name = str(current_config.get("name") or "unknown_device")
+    print("\nDry-run preview (only payload fields are shown):")
+    print(preview)
+    confirmation = input(
+        f"\nType the target switch name '{device_name}' to apply this PUT: "
+    ).strip()
+    if confirmation != device_name:
+        print("Upload cancelled: target name did not match.")
+        return
+
+    try:
+        backup_path = save_timestamped_backup(current_config)
+        print(f"Pre-change backup saved to {backup_path}")
+        path = f"/api/v1/sites/{site_id}/devices/{device_id}"
+        get_client().put_json(path, upload_data)
+        print("PUT accepted by Mist; verifying the requested fields...")
+
+        verified_config = get_device_info(site_id, device_id)
+        mismatched = [
+            key
+            for key, expected in upload_data.items()
+            if verified_config.get(key) != expected
+        ]
+        if mismatched:
+            print(
+                "Verification warning: these fields do not exactly match the "
+                f"requested values: {', '.join(mismatched)}"
+            )
+        else:
+            print("Verification succeeded: all uploaded fields match Mist.")
+    except requests.HTTPError as error:
+        status = error.response.status_code if error.response is not None else "?"
+        print(f"PUT failed with HTTP {status}. The backup was retained.")
+    except requests.RequestException as error:
+        print(f"PUT failed: {error}. The backup was retained.")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"PUT failed: {error}")
+
+
 def download_switch_config(site_id, device_id):
-    """Download one switch's config to outputs/, then optionally PUT an upload."""
+    """Read-only download of one switch configuration."""
     try:
         device_info = get_device_info(site_id, device_id)
         filepath = save_device_config(device_info)
@@ -347,139 +651,409 @@ def download_switch_config(site_id, device_id):
         print(f"Error fetching or saving device config: {e}")
         return
 
-    # Optionally upload config
-    upload = input("Would you like to upload 'upload_config.json' to this device? (y/n): ").strip().lower()
-    if upload == 'y':
-        try:
-            if not UPLOAD_CONFIG_FILE.exists():
-                print("❌ File 'upload_config.json' does not exist.")
-                return
-            if UPLOAD_CONFIG_FILE.stat().st_size == 0:
-                print("❌ File 'upload_config.json' is empty.")
-                return
-            with open(UPLOAD_CONFIG_FILE, 'r', encoding='utf-8') as f:
-                try:
-                    upload_data = json.load(f)
-                except json.JSONDecodeError as jde:
-                    print(f"❌ File is not valid JSON: {jde}")
-                    return
-            if not isinstance(upload_data, dict):
-                print("❌ File JSON structure is not a dictionary/object. Upload aborted.")
-                return
-            put_url = f"{API_URL.rstrip('/')}/api/v1/sites/{site_id}/devices/{device_id}"
-            print(f"➡️  PUT to API endpoint: {put_url}")
-            headers = {
-                "Authorization": f"Token {API_KEY}",
-                "Content-Type": "application/json"
-            }
-            put_response = requests.put(put_url, headers=headers, data=json.dumps(upload_data), timeout=REQUEST_TIMEOUT)
-            print(f"\n➡️  PUT data sent to device ID: {device_id} at endpoint: {put_url}")
-            if put_response.ok:
-                print(f"✅ PUT succeeded! Status code: {put_response.status_code}")
-            else:
-                print(f"❌ PUT failed! Status code: {put_response.status_code}")
-            try:
-                response_json = put_response.json()
-                print("API Response:", json.dumps(response_json, indent=4))
-                # Print a summary if possible
-                if "msg" in response_json:
-                    print(f"➡️  API Message: {response_json['msg']}")
-                elif "message" in response_json:
-                    print(f"➡️  API Message: {response_json['message']}")
-                elif "error" in response_json:
-                    print(f"❌ API Error: {response_json['error']}")
-                else:
-                    print("✅ PUT completed. See above for full API response.")
-            except Exception:
-                print("Raw response:", put_response.text)
-                print("⚠️  Could not decode JSON from API response.")
-        except Exception as e:
-            print(f"❌ Failed to upload config: {e}")
+
+def select_site(sites, heading, prompt, marked_site_id=None):
+    """Prompt for one site and return None on cancellation."""
+    print(f"\n{heading}")
+    for index, site in enumerate(sites, 1):
+        marker = " (source site)" if site["id"] == marked_site_id else ""
+        print(f"  {index}: {site['name']}{marker}")
+    print("  0: Cancel")
+
+    site_choice = input(prompt).strip()
+    if not site_choice.isdigit() or int(site_choice) == 0:
+        return None
+    site_index = int(site_choice)
+    if not 1 <= site_index <= len(sites):
+        print("Invalid site selection.")
+        return None
+    return sites[site_index - 1]
+
+
+def select_switch(site, heading, prompt, excluded_device_id=None):
+    """Prompt for one switch at a site and return None on cancellation."""
+    devices = get_devices(site["id"])
+    candidates = [
+        device
+        for device in devices
+        if device.get("id") != excluded_device_id
+    ]
+    if not candidates:
+        print("No eligible switches were found in that site.")
+        return None
+
+    print(f"\n{heading}")
+    for index, device in enumerate(candidates, 1):
+        print(f"  {index}: {device.get('name', 'Unnamed')}")
+    print("  0: Cancel")
+    device_choice = input(prompt).strip()
+    if not device_choice.isdigit() or int(device_choice) == 0:
+        return None
+    device_index = int(device_choice)
+    if not 1 <= device_index <= len(candidates):
+        print("Invalid switch selection.")
+        return None
+    return candidates[device_index - 1]
+
+
+def select_destination_switch(sites, source_site, source_device):
+    """Prompt for a destination site and switch, excluding the source device."""
+    destination_site = select_site(
+        sites,
+        "Destination sites",
+        "Select the destination site: ",
+        marked_site_id=source_site["id"],
+    )
+    if destination_site is None:
+        print("VLAN copy cancelled.")
+        return None, None
+    excluded_id = (
+        source_device.get("id")
+        if destination_site["id"] == source_site["id"]
+        else None
+    )
+    destination_device = select_switch(
+        destination_site,
+        "Destination switches",
+        "Select the destination switch: ",
+        excluded_device_id=excluded_id,
+    )
+    if destination_device is None:
+        print("VLAN copy cancelled.")
+        return None, None
+    return destination_site, destination_device
+
+
+def print_network_merge_plan(plan, source_count, destination_count):
+    """Display the additions-only diff and every skipped conflict."""
+    print("\nVLAN comparison summary:")
+    print(f"  Source networks:      {source_count}")
+    print(f"  Destination networks: {destination_count}")
+    print(f"  Already identical:    {len(plan.unchanged)}")
+    print(f"  Missing / to add:     {len(plan.additions)}")
+    print(f"  Conflicts / skipped:  {len(plan.conflicts)}")
+
+    if plan.conflicts:
+        print("\nConflicts that will NOT be copied or modified:")
+        for conflict in plan.conflicts:
+            destination = (
+                f"; destination: {conflict.destination_name}"
+                if conflict.destination_name
+                else ""
+            )
+            print(
+                f"  ! {conflict.source_name} (VLAN {conflict.vlan_id}): "
+                f"{conflict.reason}{destination}"
+            )
+
+    if plan.additions:
+        print("\nAdditions-only JSON diff:")
+        print(json.dumps({"networks": plan.additions}, indent=2, sort_keys=True))
+
+
+def copy_missing_vlans(sites, source_site, source_device):
+    """Copy only absent, non-conflicting source networks to another switch."""
+    try:
+        destination_site, destination_device = select_destination_switch(
+            sites, source_site, source_device
+        )
+    except Exception as error:
+        print(f"Failed to list destination switches: {error}")
+        return
+    if destination_device is None:
+        return
+
+    source_name = source_device.get("name") or "Unnamed source"
+    destination_name = destination_device.get("name") or "Unnamed destination"
+    print(f"\nComparing VLANs: '{source_name}' -> '{destination_name}'...")
+
+    try:
+        source_config = get_device_info(source_site["id"], source_device["id"])
+        destination_config = get_device_info(
+            destination_site["id"], destination_device["id"]
+        )
+        source_networks = extract_networks(source_config, "source")
+        destination_networks = extract_networks(destination_config, "destination")
+        plan = plan_network_merge(source_networks, destination_networks)
+    except (requests.RequestException, RuntimeError, ValueError) as error:
+        print(f"VLAN comparison failed: {error}")
+        return
+
+    print_network_merge_plan(plan, len(source_networks), len(destination_networks))
+    if not plan.additions:
+        print("\nNo safe missing VLANs were found. Nothing will be sent to Mist.")
+        return
+
+    print(
+        "\nSafety note: Mist replaces nested objects supplied in a PUT. The request "
+        "will therefore contain the complete destination networks map plus only the "
+        "additions shown above. No other device fields will be sent. Even with this "
+        "merge, VLAN configuration may be temporarily removed and reapplied while "
+        "Mist processes the change, causing traffic loss. This is non-production only."
+    )
+    confirmation = input(
+        f"\nType the destination switch name '{destination_name}' to continue: "
+    ).strip()
+    if confirmation != destination_name:
+        print("VLAN copy cancelled: destination name did not match.")
+        return
+
+    try:
+        fresh_destination = get_device_info(
+            destination_site["id"], destination_device["id"]
+        )
+        fresh_networks = extract_networks(fresh_destination, "destination")
+        if fresh_networks != destination_networks:
+            print(
+                "VLAN copy aborted: the destination networks changed during the "
+                "preview. Run the comparison again."
+            )
+            return
+
+        merged_networks = build_merged_networks(fresh_networks, plan.additions)
+        backup_path = save_timestamped_backup(fresh_destination)
+        print(f"Pre-change destination backup saved to {backup_path}")
+
+        path = (
+            f"/api/v1/sites/{destination_site['id']}/devices/"
+            f"{destination_device['id']}"
+        )
+        get_client().put_json(path, {"networks": merged_networks})
+
+        verified_config = get_device_info(
+            destination_site["id"], destination_device["id"]
+        )
+        verified_networks = extract_networks(verified_config, "verified destination")
+        failures = verify_network_merge(
+            fresh_networks, plan.additions, verified_networks
+        )
+        if failures:
+            print("CRITICAL: Mist accepted the PUT but verification found problems:")
+            for failure in failures:
+                print(f"  ! {failure}")
+            print(f"Use the retained backup for investigation: {backup_path}")
+            return
+
+        print(
+            f"VLAN copy succeeded: {len(plan.additions)} missing network(s) added; "
+            f"all {len(fresh_networks)} pre-existing destination network(s) verified unchanged."
+        )
+    except requests.HTTPError as error:
+        status = error.response.status_code if error.response is not None else "?"
+        print(f"VLAN copy PUT failed with HTTP {status}. No success was assumed.")
+    except requests.RequestException as error:
+        print(f"VLAN copy request failed: {error}")
+    except (OSError, RuntimeError, ValueError) as error:
+        print(f"VLAN copy failed: {error}")
+
+
+def load_sites_for_action():
+    """Load the local site catalogue with a menu-oriented error message."""
+    try:
+        return get_sites()
+    except RuntimeError as error:
+        print(f"\nLocal site catalogue is unavailable: {error}")
+        print("Run menu option 2 to download the organisation site list.")
+        return None
+
+
+def run_export_all_action():
+    if ensure_client() is None:
+        return
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    confirmation = input(
+        f"\nExport switch configurations from all {len(sites)} local site(s)? (y/N): "
+    ).strip().casefold()
+    if confirmation != "y":
+        print("Bulk export cancelled.")
+        return
+    export_all_switch_configs(sites)
+
+
+def run_device_tools_action():
+    """Select one switch and offer read-only device operations."""
+    if ensure_client() is None:
+        return
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    try:
+        site = select_site(sites, "Sites", "Select a site for device tools: ")
+        if site is None:
+            return
+        device = select_switch(
+            site, "Switches", "Select a switch for read-only tools: "
+        )
+    except Exception as error:
+        print(f"Failed to list switches: {error}")
+        return
+    if device is None:
+        return
+
+    print("\nRead-only device tools")
+    print(f"  Site:   {site['name']}")
+    print(f"  Switch: {device.get('name', 'Unnamed')}")
+    print("  1: Download this switch configuration")
+    print("  2: Export wired clients to CSV")
+    print("  0: Cancel")
+    choice = input("Choose a read-only action: ").strip()
+    if choice == "1":
+        download_switch_config(site["id"], device["id"])
+    elif choice == "2":
+        export_wired_clients_for_device(site, device)
+    elif choice != "0":
+        print("Invalid read-only action.")
+
+
+def run_vlan_copy_action():
+    """Apply the non-production feature flag and typed risk acknowledgement."""
+    settings = read_settings()
+    if not vlan_copy_enabled(settings):
+        print("\nVLAN copy is DISABLED by default.")
+        print(
+            f"To expose this non-production feature, set {VLAN_COPY_ENV_FLAG}=true "
+            "in .env and restart the tool."
+        )
+        return
+    if ensure_client() is None:
+        return
+
+    print("\n" + "!" * 72)
+    print("DANGER — NON-PRODUCTION VLAN COPY ONLY")
+    print("!" * 72)
+    print(
+        "Mist replaces the complete nested networks object during this PUT. The tool "
+        "builds a safe merged map and verifies it afterwards, but VLANs may still be "
+        "temporarily removed/reapplied while the API change is processed. This can "
+        "interrupt switching and drop production traffic."
+    )
+    print("DO NOT USE THIS FEATURE ON A PRODUCTION SWITCH.")
+    acknowledgement = input(
+        f"\nType '{VLAN_COPY_ACKNOWLEDGEMENT}' to acknowledge and continue: "
+    ).strip()
+    if acknowledgement != VLAN_COPY_ACKNOWLEDGEMENT:
+        print("VLAN copy cancelled: risk acknowledgement did not match.")
+        return
+
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    try:
+        source_site = select_site(
+            sites, "Source sites", "Select the NON-PRODUCTION source site: "
+        )
+        if source_site is None:
+            return
+        source_device = select_switch(
+            source_site,
+            "Source switches",
+            "Select the NON-PRODUCTION source switch: ",
+        )
+    except Exception as error:
+        print(f"Failed to list source switches: {error}")
+        return
+    if source_device is None:
+        return
+    copy_missing_vlans(sites, source_site, source_device)
+
+
+def run_custom_upload_action():
+    """Keep arbitrary configuration PUTs behind a dedicated danger gate."""
+    if ensure_client() is None:
+        return
+    print("\n" + "!" * 72)
+    print("DANGER — CUSTOM SWITCH CONFIGURATION PUT")
+    print("!" * 72)
+    print(
+        "This action changes a switch configuration and may interrupt production. "
+        "Use it only with an approved, reviewed payload and change plan."
+    )
+    acknowledgement = input(
+        f"\nType '{CUSTOM_UPLOAD_ACKNOWLEDGEMENT}' to choose a target: "
+    ).strip()
+    if acknowledgement != CUSTOM_UPLOAD_ACKNOWLEDGEMENT:
+        print("Custom upload cancelled: risk acknowledgement did not match.")
+        return
+
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    try:
+        site = select_site(sites, "Target sites", "Select the target site: ")
+        if site is None:
+            return
+        device = select_switch(site, "Target switches", "Select the target switch: ")
+    except Exception as error:
+        print(f"Failed to list target switches: {error}")
+        return
+    if device is None:
+        return
+
+    try:
+        current_config = get_device_info(site["id"], device["id"])
+        snapshot = save_device_config(current_config)
+        print(f"Current target configuration saved to {snapshot}")
+    except Exception as error:
+        print(f"Could not read and save the target configuration: {error}")
+        return
+    upload_config_with_preview(site["id"], device["id"], current_config)
+
+
+def print_main_menu():
+    settings = read_settings()
+    try:
+        site_count = len(get_sites())
+        catalogue_status = f"{site_count} local site(s)"
+    except RuntimeError:
+        catalogue_status = "not loaded"
+    vlan_status = "ARMED — NON-PRODUCTION ONLY" if vlan_copy_enabled(settings) else "disabled"
+
+    print("\n" + "=" * 72)
+    print("Welcome to the Securitas Juniper Mist API Tool")
+    print("=" * 72)
+    print(f"Local site catalogue: {catalogue_status}")
+    print(f"VLAN copy safety gate: {vlan_status}")
+    print("\nSetup and validation")
+    print("  1: Validate .env settings, API token, and organisation access")
+    print("  2: Refresh the local Mist site catalogue")
+    print("\nRead-only operations")
+    print("  3: Export all switch configurations to outputs/")
+    print("  4: Open read-only device tools")
+    print("\nConfiguration changes")
+    print("  5: Copy missing VLANs [NON-PRODUCTION ONLY]")
+    print("  6: Apply upload_config.json to one switch [DANGER]")
+    print("\n  0: Exit")
 
 
 def main():
     try:
-        while True:
-            # Step 1: List sites
-            try:
-                sites = get_sites()
-            except Exception as e:
-                print(f"Error loading sites: {e}")
-                return
+        configure_client()
+    except (RuntimeError, ValueError):
+        # Keep the menu available so option 1 can explain incomplete settings.
+        pass
 
-            print("Available Sites:")
-            for idx, site in enumerate(sites, 1):
-                print(f"{idx}: {site['name']}")
-            print("A: Save configurations for all switches")
-            print("0: Exit")
-            site_choice_str = input(
-                "Select a site, A to save all switch configs, or 0 to exit: "
-            ).strip()
-            if site_choice_str.casefold() == "a":
-                export_all_switch_configs(sites)
-                continue
-            if not site_choice_str.isdigit():
-                print("Invalid input. Please enter a site number, A, or 0.")
-                continue
-            site_choice = int(site_choice_str)
-            if site_choice == 0:
-                print("Exiting.")
-                return
-            if not (1 <= site_choice <= len(sites)):
-                print("Invalid selection. Try again.")
-                continue
-            selected_site = sites[site_choice - 1]
-            site_id = selected_site['id']
-
-            while True:
-                # Step 2: List devices in site
-                try:
-                    devices = get_devices(site_id)
-                except Exception as e:
-                    print(f"Error fetching devices: {e}")
-                    break
-
-                if not devices:
-                    print("\nNo devices found in this site.")
-                    break
-                print("\nDevices in selected site:")
-                for idx, device in enumerate(devices, 1):
-                    print(f"{idx}: {device.get('name', 'Unnamed')}")
-                print("0: Return to site menu")
-                print("99: Exit")
-                device_choice_str = input("Select a device by number (0 to return, 99 to exit): ").strip()
-                if not device_choice_str.isdigit():
-                    print("Invalid input. Please enter a number.")
-                    continue
-                device_choice = int(device_choice_str)
-                if device_choice == 0:
-                    break
-                if device_choice == 99:
-                    print("Exiting.")
-                    sys.exit(0)
-                if not (1 <= device_choice <= len(devices)):
-                    print("Invalid selection. Try again.")
-                    continue
-                selected_device = devices[device_choice - 1]
-                device_id = selected_device['id']
-
-                # Step 3: Choose an action for the selected switch
-                while True:
-                    print(f"\nSelected switch: {selected_device.get('name', 'Unnamed')}")
-                    print("  1: Download switch configuration (JSON -> outputs/)")
-                    print("  2: Export wired clients (IP/MAC) to CSV -> outputs/")
-                    print("  0: Back to device list")
-                    action = input("Choose an action (1, 2, or 0): ").strip()
-                    if action == '0':
-                        break
-                    if action == '1':
-                        download_switch_config(site_id, device_id)
-                    elif action == '2':
-                        export_wired_clients_for_device(selected_site, selected_device)
-                    else:
-                        print("Invalid input. Please enter 1, 2, or 0.")
-    except Exception as e:
-        print(f"Failed: {e}")
+    while True:
+        print_main_menu()
+        choice = input("\nChoose an option: ").strip()
+        if choice == "0":
+            print("Exiting.")
+            return
+        if choice == "1":
+            validate_api_configuration()
+        elif choice == "2":
+            refresh_site_catalogue()
+        elif choice == "3":
+            run_export_all_action()
+        elif choice == "4":
+            run_device_tools_action()
+        elif choice == "5":
+            run_vlan_copy_action()
+        elif choice == "6":
+            run_custom_upload_action()
+        else:
+            print("Invalid selection. Enter a number from 0 to 6.")
 
 if __name__ == "__main__":
     main()
