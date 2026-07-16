@@ -879,7 +879,7 @@ def run_export_all_action():
     if not sites:
         return
     confirmation = input(
-        f"\nExport switch configurations from all {len(sites)} local site(s)? (y/N): "
+        f"\nExport device configurations from all {len(sites)} sites? (Y/N): "
     ).strip().casefold()
     if confirmation != "y":
         print("Bulk export cancelled.")

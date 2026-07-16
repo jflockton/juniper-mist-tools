@@ -143,6 +143,22 @@ class MenuSafetyTests(unittest.TestCase):
 
         export_all.assert_called_once_with()
 
+    def test_bulk_export_confirmation_uses_device_wording(self):
+        sites = [{"id": str(index)} for index in range(20)]
+        with (
+            patch.object(interactive_api, "ensure_client", return_value=object()),
+            patch.object(interactive_api, "load_sites_for_action", return_value=sites),
+            patch.object(interactive_api, "export_all_switch_configs") as export_all,
+            patch("builtins.input", return_value="n") as prompt,
+            redirect_stdout(StringIO()),
+        ):
+            interactive_api.run_export_all_action()
+
+        prompt.assert_called_once_with(
+            "\nExport device configurations from all 20 sites? (Y/N): "
+        )
+        export_all.assert_not_called()
+
     def test_download_switch_config_is_read_only(self):
         config = {"id": "device", "name": "Switch"}
         with (
