@@ -128,6 +128,36 @@ class MenuSafetyTests(unittest.TestCase):
 
         export_all.assert_called_once_with()
 
+    def test_operational_menu_dispatch_after_adding_mac_finder(self):
+        sites = [{"id": "1", "name": "Site"}]
+        for choice, target in (
+            ("3", "run_find_client_action"),
+            ("4", "run_vlan_preparation_action"),
+            ("5", "run_custom_upload_action"),
+        ):
+            with (
+                patch.object(interactive_api, "configure_client"),
+                patch.object(interactive_api, "get_sites", return_value=sites),
+                patch.object(interactive_api, target) as action,
+                patch("builtins.input", side_effect=[choice, "0"]),
+                redirect_stdout(StringIO()),
+            ):
+                interactive_api.main()
+            action.assert_called_once_with()
+
+    def test_find_client_action_is_read_only_and_has_no_danger_gate(self):
+        with (
+            patch.object(interactive_api, "ensure_client", return_value=object()),
+            patch.object(
+                interactive_api,
+                "load_sites_for_action",
+                return_value=[{"id": "1", "name": "Site"}],
+            ),
+            patch.object(interactive_api, "find_client_by_mac") as finder,
+        ):
+            interactive_api.run_find_client_action()
+        finder.assert_called_once_with([{"id": "1", "name": "Site"}])
+
     def test_bulk_export_confirmation_uses_device_wording(self):
         sites = [{"id": str(index)} for index in range(20)]
         with (

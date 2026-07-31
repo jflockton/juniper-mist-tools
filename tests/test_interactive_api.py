@@ -2,6 +2,8 @@ import csv
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,6 +28,73 @@ class InteractiveApiTests(unittest.TestCase):
         self.assertEqual(
             interactive_api._normalise_mac("D4:99:6C-AA"), "d4996caa"
         )
+
+    def test_parse_mac_accepts_common_formats(self):
+        for value in (
+            "5805D91A85D5",
+            "58:05:D9:1A:85:D5",
+            "58-05-d9-1a-85-d5",
+            "5805.d91a.85d5",
+            "58 05 d9 1a 85 d5",
+        ):
+            self.assertEqual(interactive_api.parse_mac(value), "5805d91a85d5")
+
+    def test_parse_mac_rejects_invalid(self):
+        for value in ("", "nothex", "1234", "5805d91a85d5ab", "zzzzzzzzzzzz"):
+            self.assertIsNone(interactive_api.parse_mac(value))
+
+    def test_get_wired_clients_sends_optional_mac_filter(self):
+        client = SequenceClient([{"results": []}])
+        with patch.object(interactive_api, "_CLIENT", client):
+            interactive_api.get_wired_clients("s", 1, 2, mac="5805d91a85d5")
+        self.assertEqual(client.calls[0][1]["mac"], "5805d91a85d5")
+
+    def test_find_client_by_mac_reports_last_seen_location(self):
+        sites = [{"id": "site-1", "name": "uksecmkps"}]
+        matched = {
+            "mac": "5805d91a85d5",
+            "last_device_mac": "d4996caad5ad",
+            "last_port_id": "ge-0/0/16",
+            "last_vlan": 220,
+            "last_vlan_name": "cctv",
+            "manufacture": "Seiko Epson Corporation",
+            "timestamp": 0,
+        }
+        with (
+            patch.object(
+                interactive_api, "get_wired_clients", return_value=[matched]
+            ),
+            patch.object(
+                interactive_api,
+                "get_devices",
+                return_value=[{"mac": "d4996caad5ad", "name": "uksecmkps-cctvSw"}],
+            ),
+            patch("builtins.input", side_effect=["58:05:d9:1a:85:d5", "7"]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.find_client_by_mac(sites)
+        text = output.getvalue()
+        self.assertIn("uksecmkps-cctvSw", text)
+        self.assertIn("ge-0/0/16", text)
+        self.assertIn("Seiko Epson", text)
+
+    def test_find_client_by_mac_reports_no_match(self):
+        with (
+            patch.object(interactive_api, "get_wired_clients", return_value=[]),
+            patch("builtins.input", side_effect=["58:05:d9:1a:85:d5", "7"]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.find_client_by_mac([{"id": "s", "name": "Site"}])
+        self.assertIn("Not found", output.getvalue())
+
+    def test_find_client_by_mac_rejects_bad_mac_without_searching(self):
+        with (
+            patch.object(interactive_api, "get_wired_clients") as search,
+            patch("builtins.input", side_effect=["not-a-mac"]),
+            redirect_stdout(StringIO()),
+        ):
+            interactive_api.find_client_by_mac([{"id": "s", "name": "Site"}])
+        search.assert_not_called()
 
     def test_wired_client_mapping_handles_missing_optional_fields(self):
         row = interactive_api.wired_client_to_row(
