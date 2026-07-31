@@ -132,8 +132,9 @@ class MenuSafetyTests(unittest.TestCase):
         sites = [{"id": "1", "name": "Site"}]
         for choice, target in (
             ("3", "run_find_client_action"),
-            ("4", "run_vlan_preparation_action"),
-            ("5", "run_custom_upload_action"),
+            ("4", "run_lldp_export_action"),
+            ("5", "run_vlan_preparation_action"),
+            ("6", "run_custom_upload_action"),
         ):
             with (
                 patch.object(interactive_api, "configure_client"),
@@ -157,6 +158,31 @@ class MenuSafetyTests(unittest.TestCase):
         ):
             interactive_api.run_find_client_action()
         finder.assert_called_once_with([{"id": "1", "name": "Site"}])
+
+    def test_lldp_export_action_is_read_only_and_writes_csv(self):
+        rows = [{
+            "site": "MK", "switch_name": "coreSw", "local_port": "ge-0/0/1",
+            "neighbor_system_name": "distSw", "neighbor_mac": "aabbcc",
+            "neighbor_port_desc": "",
+        }]
+        with (
+            patch.object(interactive_api, "ensure_client", return_value=object()),
+            patch.object(
+                interactive_api,
+                "load_sites_for_action",
+                return_value=[{"id": "s1", "name": "MK"}],
+            ),
+            patch.object(
+                interactive_api, "collect_lldp_neighbours", return_value=rows
+            ),
+            patch.object(
+                interactive_api, "write_lldp_csv", return_value="lldp.csv"
+            ) as write_csv,
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.run_lldp_export_action()
+        write_csv.assert_called_once_with(rows)
+        self.assertIn("LLDP neighbour", output.getvalue())
 
     def test_bulk_export_confirmation_uses_device_wording(self):
         sites = [{"id": str(index)} for index in range(20)]

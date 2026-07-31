@@ -638,6 +638,100 @@ def find_client_by_mac(sites):
         )
 
 
+LLDP_CSV_COLUMNS = [
+    "site", "switch_name", "local_port",
+    "neighbor_system_name", "neighbor_mac", "neighbor_port_desc",
+]
+
+
+def get_switch_ports(site_id, lookback_seconds=86400):
+    """Return all currently-up switch ports at a site (Mist stats/ports/search).
+
+    Each port row carries the LLDP neighbour fields; paged via limit/total.
+    """
+    path = f"/api/v1/sites/{site_id}/stats/ports/search"
+    start = int(time.time()) - lookback_seconds
+    rows = []
+    page = 1
+    while True:
+        payload = get_client().get_json(
+            path, params={"up": "true", "start": start, "limit": 1000, "page": page}
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("Mist returned an unexpected port-stats response")
+        batch = payload.get("results", [])
+        if not isinstance(batch, list):
+            raise RuntimeError("Mist returned invalid port-stats results")
+        rows.extend(batch)
+        total = payload.get("total")
+        if (
+            not batch
+            or not isinstance(total, int)
+            or len(rows) >= total
+            or len(batch) < 1000
+        ):
+            break
+        page += 1
+    return rows
+
+
+def collect_lldp_neighbours(sites):
+    """Collect LLDP neighbours from every switch at every site into flat rows."""
+    rows = []
+    for site in sites:
+        site_name = site.get("name", "Unnamed site")
+        site_id = site.get("id")
+        if not site_id:
+            continue
+        name_by_mac = {}
+        try:
+            for device in get_devices(site_id, device_type="switch"):
+                mac = _normalise_mac(device.get("mac"))
+                if mac:
+                    name_by_mac[mac] = device.get("name") or mac
+        except Exception as error:
+            print(f"  {site_name}: could not list switches: {error}")
+        try:
+            ports = get_switch_ports(site_id)
+        except Exception as error:
+            print(f"  {site_name}: could not read LLDP/port stats: {error}")
+            continue
+        for row in ports:
+            neighbor_mac = row.get("neighbor_mac")
+            neighbor_name = row.get("neighbor_system_name")
+            if not (neighbor_mac or neighbor_name):
+                continue
+            local_mac = _normalise_mac(row.get("mac"))
+            rows.append({
+                "site": site_name,
+                "switch_name": name_by_mac.get(local_mac, local_mac or "unknown"),
+                "local_port": row.get("port_id") or "",
+                "neighbor_system_name": neighbor_name or "",
+                "neighbor_mac": _normalise_mac(neighbor_mac),
+                "neighbor_port_desc": row.get("neighbor_port_desc") or "",
+            })
+    return rows
+
+
+def write_lldp_csv(rows):
+    """Write collected LLDP neighbours to a timestamped CSV in outputs/."""
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    base = f"lldp_neighbours_all_sites_{stamp}"
+    filepath = OUTPUT_DIR / f"{base}.csv"
+    suffix = 2
+    while filepath.exists():
+        filepath = OUTPUT_DIR / f"{base}_{suffix}.csv"
+        suffix += 1
+    with filepath.open("w", newline="", encoding="utf-8") as output_file:
+        writer = csv.DictWriter(
+            output_file, fieldnames=LLDP_CSV_COLUMNS, extrasaction="ignore"
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+    return str(filepath)
+
+
 def build_config_diff(current_config, proposed_changes):
     """Return a unified diff limited to fields present in the proposed payload."""
     current_subset = {
@@ -1048,6 +1142,25 @@ def run_find_client_action():
     find_client_by_mac(sites)
 
 
+def run_lldp_export_action():
+    """Collect LLDP neighbours from every switch at every site into one CSV."""
+    if ensure_client() is None:
+        return
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    print("\nCollecting LLDP neighbours from all switches across all sites...")
+    rows = collect_lldp_neighbours(sites)
+    if not rows:
+        print("No LLDP neighbours were found across the configured sites.")
+        return
+    path = write_lldp_csv(rows)
+    switches = len({(row["site"], row["switch_name"]) for row in rows})
+    print(
+        f"Saved {len(rows)} LLDP neighbour row(s) from {switches} switch(es) to {path}"
+    )
+
+
 def run_vlan_preparation_action():
     """Capture one source switch's VLAN dataset without selecting a destination."""
     if ensure_client() is None:
@@ -1226,17 +1339,18 @@ def print_main_menu(sites):
     print("  1: Export all device configurations to outputs")
     print("  2: Open read-only device tools")
     print("  3: Find a client by MAC across all sites")
+    print("  4: Collect LLDP neighbours from all switches (CSV)")
     print("\nExport configuration from a source device (no changes)")
     print(
         "  This exports the selected configuration type to upload_config.json,"
     )
     print("  ready for upload to another Juniper device.")
     print(
-        "  4: Collect VLAN configuration from source device and insert into "
+        "  5: Collect VLAN configuration from source device and insert into "
         "upload_config.json"
     )
     print("\nConfiguration change")
-    print("  5: PUSH upload_config.json to destination device [DANGER]")
+    print("  6: PUSH upload_config.json to destination device [DANGER]")
     print("\n  0: Exit")
 
 
@@ -1276,11 +1390,13 @@ def main():
         elif choice == "3":
             run_find_client_action()
         elif choice == "4":
-            run_vlan_preparation_action()
+            run_lldp_export_action()
         elif choice == "5":
+            run_vlan_preparation_action()
+        elif choice == "6":
             run_custom_upload_action()
         else:
-            print("Invalid selection. Enter a number from 0 to 5.")
+            print("Invalid selection. Enter a number from 0 to 6.")
 
 if __name__ == "__main__":
     main()

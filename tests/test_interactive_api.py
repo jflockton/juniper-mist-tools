@@ -96,6 +96,44 @@ class InteractiveApiTests(unittest.TestCase):
             interactive_api.find_client_by_mac([{"id": "s", "name": "Site"}])
         search.assert_not_called()
 
+    def test_get_switch_ports_pages_until_total(self):
+        client = SequenceClient([
+            {"results": [{"mac": "a"} for _ in range(1000)], "total": 1001},
+            {"results": [{"mac": "b"}], "total": 1001},
+        ])
+        with patch.object(interactive_api, "_CLIENT", client):
+            rows = interactive_api.get_switch_ports("s")
+        self.assertEqual(len(rows), 1001)
+        self.assertEqual(client.calls[0][1]["up"], "true")
+
+    def test_collect_lldp_neighbours_maps_switch_name_and_skips_empty(self):
+        sites = [{"id": "s1", "name": "MK"}]
+        with (
+            patch.object(
+                interactive_api,
+                "get_devices",
+                return_value=[{"mac": "aa:bb:cc:00:00:01", "name": "coreSw"}],
+            ),
+            patch.object(
+                interactive_api,
+                "get_switch_ports",
+                return_value=[
+                    {"mac": "aabbcc000001", "port_id": "ge-0/0/1",
+                     "neighbor_system_name": "distSw",
+                     "neighbor_mac": "AABB.CC00.0002",
+                     "neighbor_port_desc": "ge-0/0/9"},
+                    {"mac": "aabbcc000001", "port_id": "ge-0/0/2"},  # no neighbour
+                ],
+            ),
+        ):
+            rows = interactive_api.collect_lldp_neighbours(sites)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["site"], "MK")
+        self.assertEqual(rows[0]["switch_name"], "coreSw")
+        self.assertEqual(rows[0]["local_port"], "ge-0/0/1")
+        self.assertEqual(rows[0]["neighbor_system_name"], "distSw")
+        self.assertEqual(rows[0]["neighbor_mac"], "aabbcc000002")
+
     def test_wired_client_mapping_handles_missing_optional_fields(self):
         row = interactive_api.wired_client_to_row(
             {"mac": "aabbcc", "last_port_id": "ge-1/0/2"}, "Switch A"
