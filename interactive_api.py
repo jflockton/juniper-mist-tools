@@ -341,7 +341,18 @@ def _first(value):
 
 def _normalise_mac(mac):
     """Lower-case, strip separators: 'D4:99:6C-AA' -> 'd4996caa'."""
-    return str(mac or "").lower().replace(":", "").replace("-", "")
+    return re.sub(r"[^0-9a-fA-F]", "", str(mac or "")).lower()
+
+
+def parse_mac(raw):
+    """Normalise a user-entered MAC to bare 12-hex lowercase, or None if invalid.
+
+    Accepts any common format: 'aa:bb:cc:dd:ee:ff', 'aa-bb-cc-dd-ee-ff',
+    Cisco dotted 'aabb.ccdd.eeff', spaced, or unseparated - any case. The Mist
+    API wants the bare 12-hex form, which is what this returns.
+    """
+    cleaned = _normalise_mac(raw)
+    return cleaned if len(cleaned) == 12 else None
 
 
 def _safe_component(name):
@@ -363,13 +374,17 @@ def derive_fpc(port_id):
     return match.group(1) if match else ""
 
 
-def get_wired_clients(site_id, start_epoch, end_epoch):
+def get_wired_clients(site_id, start_epoch, end_epoch, mac=None):
     """Return every wired-client row for a site over [start_epoch, end_epoch].
 
     Follows the response 'next' cursor (search_after paging) until exhausted.
+    Pass ``mac`` to have Mist pre-filter server-side; callers should still
+    verify the match client-side, as the API treats it as a partial match.
     """
     path = f"/api/v1/sites/{site_id}/wired_clients/search"
     params = {"start": int(start_epoch), "end": int(end_epoch), "limit": 1000}
+    if mac:
+        params["mac"] = mac
 
     clients = []
     seen_cursors = set()
@@ -535,6 +550,91 @@ def export_wired_clients_for_device(site, device):
         print(
             f"No wired clients found on '{device_name}' in the last {days} day(s). "
             f"Wrote a header-only CSV to {filepath}"
+        )
+
+
+def _switch_name_lookup(site_id):
+    """Return {normalised_switch_mac: name} for a site's switches (best effort)."""
+    names = {}
+    try:
+        for device in get_devices(site_id, device_type="switch"):
+            mac = _normalise_mac(device.get("mac"))
+            if mac:
+                names[mac] = device.get("name") or mac
+    except Exception:
+        pass
+    return names
+
+
+def find_client_by_mac(sites):
+    """Search every site's wired clients for a MAC; report where it was last seen.
+
+    This is a 'last seen' history lookup (wired_clients/search), not a live port
+    read - the device may since have moved or been unplugged, so the reported
+    last-seen time matters. Verify live on the switch front panel if in doubt.
+    """
+    target = parse_mac(input("Enter the client MAC to find (any format): ").strip())
+    if not target:
+        print("That does not look like a MAC address (need 12 hex digits).")
+        return
+
+    days = _prompt_lookback_days(default=7)
+    end_epoch = int(time.time())
+    start_epoch = end_epoch - days * 86400
+    pretty = ":".join(target[index:index + 2] for index in range(0, 12, 2))
+    print(f"\nSearching {len(sites)} site(s) for {pretty} over the last {days} day(s)...")
+
+    hits = []
+    for site in sites:
+        site_id = site.get("id")
+        site_name = site.get("name", "Unnamed site")
+        if not site_id:
+            continue
+        try:
+            clients = get_wired_clients(site_id, start_epoch, end_epoch, mac=target)
+        except Exception as error:
+            print(f"  {site_name}: {error}")
+            continue
+        for client in clients:
+            if _normalise_mac(client.get("mac")) == target:
+                hits.append((site, client))
+
+    if not hits:
+        print(
+            f"\nNot found. {pretty} has not been seen on any site's wired clients "
+            f"in the last {days} day(s). If it has never been powered on / patched, "
+            f"Mist cannot see it - trace it physically."
+        )
+        return
+
+    hits.sort(key=lambda item: item[1].get("timestamp") or 0, reverse=True)
+    name_cache = {}
+    print(f"\nFound {len(hits)} match(es), most recent first:")
+    for site, client in hits:
+        site_id = site["id"]
+        if site_id not in name_cache:
+            name_cache[site_id] = _switch_name_lookup(site_id)
+        switch_mac = _normalise_mac(client.get("last_device_mac"))
+        switch_name = name_cache[site_id].get(switch_mac, switch_mac or "unknown")
+        timestamp = client.get("timestamp")
+        try:
+            last_seen = (
+                datetime.fromtimestamp(float(timestamp), timezone.utc)
+                .strftime("%Y-%m-%d %H:%M:%S")
+                if timestamp not in (None, "")
+                else "?"
+            )
+        except (TypeError, ValueError, OverflowError, OSError):
+            last_seen = "?"
+        ip = client.get("last_ip") or _first(client.get("ip")) or "(none learned)"
+        print(
+            f"\n  Site      : {site.get('name', 'Unnamed site')}"
+            f"\n  Switch    : {switch_name} ({switch_mac})"
+            f"\n  Port      : {client.get('last_port_id')}"
+            f"\n  VLAN      : {client.get('last_vlan')} ({client.get('last_vlan_name') or ''})"
+            f"\n  IP        : {ip}"
+            f"\n  Vendor    : {client.get('manufacture')}"
+            f"\n  Last seen : {last_seen} UTC"
         )
 
 
@@ -938,6 +1038,16 @@ def run_device_tools_action():
         print("Invalid read-only action.")
 
 
+def run_find_client_action():
+    """Locate a wired client by MAC across every configured site (read-only)."""
+    if ensure_client() is None:
+        return
+    sites = load_sites_for_action()
+    if not sites:
+        return
+    find_client_by_mac(sites)
+
+
 def run_vlan_preparation_action():
     """Capture one source switch's VLAN dataset without selecting a destination."""
     if ensure_client() is None:
@@ -1115,17 +1225,18 @@ def print_main_menu(sites):
     print("\nRead-only operations")
     print("  1: Export all device configurations to outputs")
     print("  2: Open read-only device tools")
+    print("  3: Find a client by MAC across all sites")
     print("\nExport configuration from a source device (no changes)")
     print(
         "  This exports the selected configuration type to upload_config.json,"
     )
     print("  ready for upload to another Juniper device.")
     print(
-        "  3: Collect VLAN configuration from source device and insert into "
+        "  4: Collect VLAN configuration from source device and insert into "
         "upload_config.json"
     )
     print("\nConfiguration change")
-    print("  4: PUSH upload_config.json to destination device [DANGER]")
+    print("  5: PUSH upload_config.json to destination device [DANGER]")
     print("\n  0: Exit")
 
 
@@ -1163,11 +1274,13 @@ def main():
         elif choice == "2":
             run_device_tools_action()
         elif choice == "3":
-            run_vlan_preparation_action()
+            run_find_client_action()
         elif choice == "4":
+            run_vlan_preparation_action()
+        elif choice == "5":
             run_custom_upload_action()
         else:
-            print("Invalid selection. Enter a number from 0 to 4.")
+            print("Invalid selection. Enter a number from 0 to 5.")
 
 if __name__ == "__main__":
     main()
