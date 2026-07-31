@@ -25,6 +25,7 @@ There is no compilation or packaging step. Set up Python, install the dependenci
 | [Optional configuration upload](#optional-configuration-upload) | Preview, back up, apply, and verify `upload_config.json` |
 | [Export wired clients to CSV](#export-wired-clients-to-csv) | Export the selected switch's wired-client inventory |
 | [Find a client by MAC](#find-a-client-by-mac-across-all-sites) | Locate where a MAC was last seen across every site |
+| [Collect LLDP neighbours](#collect-lldp-neighbours-from-all-switches) | Export every switch's LLDP neighbours to one CSV |
 | [Copy missing VLANs](#copy-missing-vlans) | Safely add absent source VLANs to another switch |
 | [Run the tests](#run-the-tests) | Run the offline mocked unit-test suite |
 | [Refreshing sites](#refreshing-sites) | Update local site IDs after Mist changes |
@@ -203,14 +204,15 @@ Read-only operations
   1: Export all device configurations to outputs
   2: Open read-only device tools
   3: Find a client by MAC across all sites
+  4: Collect LLDP neighbours from all switches (CSV)
 
 Export configuration from a source device (no changes)
   This exports the selected configuration type to upload_config.json,
   ready for upload to another Juniper device.
-  4: Collect VLAN configuration from source device and insert into upload_config.json
+  5: Collect VLAN configuration from source device and insert into upload_config.json
 
 Configuration change
-  5: PUSH upload_config.json to destination device [DANGER]
+  6: PUSH upload_config.json to destination device [DANGER]
 
   0: Exit
 ```
@@ -240,7 +242,7 @@ The `outputs` directory is created automatically. Invalid filename characters ar
 
 ## Optional configuration upload
 
-Top-level option `5` previews and applies the partial JSON object in
+Top-level option `6` previews and applies the partial JSON object in
 `upload_config.json` to one explicitly selected switch. It is intentionally separate
 from all download and preparation paths.
 
@@ -249,7 +251,7 @@ To use this feature:
 1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
 3. Remove a stale `upload_config.meta.json` if this is a manually managed payload.
-4. Choose option `5` and type `APPLY CUSTOM CONFIG` at the danger gate.
+4. Choose option `6` and type `APPLY CUSTOM CONFIG` at the danger gate.
 5. Select the intended site and switch carefully.
 6. Review the unified dry-run diff limited to the payload fields.
 7. Type the target switch name exactly to approve the PUT.
@@ -309,20 +311,40 @@ Notes:
   be found this way — trace it physically.
 - The client IP is only present where Mist has learned one, so it is often blank.
 
+## Collect LLDP neighbours from all switches
+
+Read-only top-level option `4` pulls the LLDP neighbours seen by **every switch at
+every site** and writes them to a single CSV:
+
+```text
+outputs/lldp_neighbours_all_sites_<YYYYMMDD-HHMMSS>.csv
+```
+
+Columns: `site, switch_name, local_port, neighbor_system_name, neighbor_mac, neighbor_port_desc`.
+
+Notes:
+
+- Data comes from the Mist `stats/ports/search` endpoint, which is site-wide — one
+  paginated call per site covers all of that site's switches, so no per-switch runs.
+- Only ports that report an LLDP neighbour are written; a neighbour may be another
+  switch, an access point, a phone, or a WAN/other-vendor device.
+- `neighbor_system_name` is the neighbour's advertised name (blank where it only
+  advertises a chassis MAC); `neighbor_port_desc` is the neighbour's port.
+
 ## Create a VLAN source dataset
 
-Top-level option `4` is a preparation workflow. It performs read-only Mist API calls
+Top-level option `5` is a preparation workflow. It performs read-only Mist API calls
 to collect one selected source switch's validated `networks` dataset and writes it to
-the ignored local file `upload_config.json`. **Option 4 does not ask for a destination,
+the ignored local file `upload_config.json`. **Option 5 does not ask for a destination,
 send a PUT, or change a Mist device.**
 
 After source selection, the tool fetches the configuration into memory, extracts and
 validates `networks`, then atomically creates or replaces `upload_config.json` in the
 form `{"networks": {...}}` without another confirmation prompt. Ignored
 `upload_config.meta.json` records the source identity and dataset hash. The destination
-is selected only after entering dangerous option `5`.
+is selected only after entering dangerous option `6`.
 
-When option `5` recognises a VLAN source dataset, it asks for the destination site and
+When option `6` recognises a VLAN source dataset, it asks for the destination site and
 switch, reads that destination's current networks, and then applies these comparison
 rules:
 
@@ -335,13 +357,13 @@ The comparison uses both the network name and `vlan_id`:
 - Case-insensitive name collisions and duplicate source VLAN IDs are conflicts and
   are skipped.
 
-Option `5` prints a summary plus an additions-only JSON diff. If there are no safe
+Option `6` prints a summary plus an additions-only JSON diff. If there are no safe
 additions, nothing is sent to Mist.
 
 Mist `PUT` semantics require special care: a nested object included in a request
 replaces that object in its entirety. Sending only the missing entries inside
 `networks` could therefore remove the destination's existing networks. The source
-dataset is never sent directly. Option `5` constructs this final API payload in memory:
+dataset is never sent directly. Option `6` constructs this final API payload in memory:
 
 ```json
 {
@@ -352,7 +374,7 @@ dataset is never sent directly. Option `5` constructs this final API payload in 
 }
 ```
 
-Option `5` verifies the dataset hash, performs a GET, and displays an additions-only
+Option `6` verifies the dataset hash, performs a GET, and displays an additions-only
 JSON preview for the selected destination without unified-diff hunk markers. It states
 how many existing networks remain unchanged, requires the exact destination switch
 name, then reads the destination
@@ -370,13 +392,14 @@ access:
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
-The 62 tests cover site-key generation, pagination and cursor safeguards, response
-mapping, CSV output, MAC parsing and cross-site client lookup, upload-payload/diff
-validation, VLAN conflict classification, source-dataset hashing, destination-time
-full-map construction, concurrent-change aborts, and post-PUT field checks. Menu tests
-also enforce read-only/preparation/write separation, the operational option numbering
-(including the MAC finder), all-device bulk export, token-redaction behaviour, and
-protection against stale environment tokens masking edits to `.env`.
+The 65 tests cover site-key generation, pagination and cursor safeguards, response
+mapping, CSV output, MAC parsing and cross-site client lookup, LLDP neighbour
+collection, upload-payload/diff validation, VLAN conflict classification,
+source-dataset hashing, destination-time full-map construction, concurrent-change
+aborts, and post-PUT field checks. Menu tests also enforce read-only/preparation/write
+separation, the operational option numbering (including the MAC finder and LLDP
+export), all-device bulk export, token-redaction behaviour, and protection against
+stale environment tokens masking edits to `.env`.
 
 ## Refreshing sites
 
