@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -30,6 +31,16 @@ REQUEST_TIMEOUT = 30
 _CLIENT = None
 _SETTINGS = None
 CUSTOM_UPLOAD_ACKNOWLEDGEMENT = "APPLY CUSTOM CONFIG"
+
+# Menu keys live here so help text never hardcodes a number that renumbering
+# would silently invalidate. The config-changing action deliberately uses a
+# letter: no adjacent digit can reach it by mistype.
+MENU_WIDTH = 72
+SETUP_MENU_KEY = "S"
+SETUP_VALIDATE_KEY = "1"
+SETUP_REFRESH_KEY = "2"
+PUSH_CONFIG_KEY = "P"
+EXIT_KEY = "0"
 
 
 def read_settings():
@@ -83,7 +94,10 @@ def ensure_client():
         return configure_client()
     except (RuntimeError, ValueError) as error:
         print(f"\nAPI client is not ready: {error}")
-        print("Run menu option 1 to validate the local configuration.")
+        print(
+            f"Run setup option {SETUP_VALIDATE_KEY} to validate the local "
+            "configuration."
+        )
         return None
 
 def get_sites():
@@ -164,7 +178,10 @@ def validate_api_configuration():
         print(f"[OK] Local site catalogue: {len(local_sites)} site(s) available")
     except RuntimeError as error:
         print(f"[WARN] Local site catalogue: {error}")
-        print("       Run menu option 2 to download the organisation site list.")
+        print(
+            f"       Run setup option {SETUP_REFRESH_KEY} to download the "
+            "organisation site list."
+        )
 
     print("\nValidation completed successfully. The API token itself was not displayed.")
     return True
@@ -178,7 +195,10 @@ def refresh_site_catalogue():
     settings = _SETTINGS or read_settings()
     org_id = settings.get("ORG_ID", "")
     if not org_id:
-        print("\nORG_ID is missing. Run menu option 1 after updating .env.")
+        print(
+            f"\nORG_ID is missing. Run setup option {SETUP_VALIDATE_KEY} "
+            "after updating .env."
+        )
         return False
 
     print("\nDownloading the organisation site catalogue...")
@@ -1078,7 +1098,10 @@ def load_sites_for_action():
         return get_sites()
     except RuntimeError as error:
         print(f"\nLocal site catalogue is unavailable: {error}")
-        print("Return to the menu to open initial setup and download the site list.")
+        print(
+            f"Choose {SETUP_MENU_KEY} at the main menu to open setup and "
+            "download the site list."
+        )
         return None
 
 
@@ -1097,39 +1120,44 @@ def run_export_all_action():
     export_all_device_configs(sites)
 
 
-def run_device_tools_action():
-    """Select one switch and offer read-only device operations."""
+def select_switch_for_action(purpose):
+    """Resolve one site and switch for a single-switch action.
+
+    Returns ``(site, device)``, or ``(None, None)`` when the client, the local
+    catalogue, or the operator's own selection stops the action.
+    """
     if ensure_client() is None:
-        return
+        return None, None
     sites = load_sites_for_action()
     if not sites:
-        return
+        return None, None
     try:
-        site = select_site(sites, "Sites", "Select a site for device tools: ")
+        site = select_site(sites, "Sites", f"Select a site to {purpose}: ")
         if site is None:
-            return
-        device = select_switch(
-            site, "Switches", "Select a switch for read-only tools: "
-        )
+            return None, None
+        device = select_switch(site, "Switches", f"Select a switch to {purpose}: ")
     except Exception as error:
         print(f"Failed to list switches: {error}")
-        return
+        return None, None
+    if device is None:
+        return None, None
+    return site, device
+
+
+def run_download_config_action():
+    """Download one switch's configuration to outputs (read-only)."""
+    site, device = select_switch_for_action("download the configuration from")
     if device is None:
         return
+    download_switch_config(site["id"], device["id"])
 
-    print("\nRead-only device tools")
-    print(f"  Site:   {site['name']}")
-    print(f"  Switch: {device.get('name', 'Unnamed')}")
-    print("  1: Download this switch configuration")
-    print("  2: Export wired clients to CSV")
-    print("  0: Cancel")
-    choice = input("Choose a read-only action: ").strip()
-    if choice == "1":
-        download_switch_config(site["id"], device["id"])
-    elif choice == "2":
-        export_wired_clients_for_device(site, device)
-    elif choice != "0":
-        print("Invalid read-only action.")
+
+def run_export_clients_action():
+    """Export one switch's wired-client inventory to CSV (read-only)."""
+    site, device = select_switch_for_action("export wired clients from")
+    if device is None:
+        return
+    export_wired_clients_for_device(site, device)
 
 
 def run_find_client_action():
@@ -1316,87 +1344,208 @@ def run_custom_upload_action():
     )
 
 
-def print_initial_setup_menu(catalogue_error):
-    """Show only the actions needed before device operations are available."""
-    print("\n" + "=" * 72)
-    print("Welcome to the Securitas Juniper Mist API Tool")
-    print("=" * 72)
-    print("\nYou do not currently have any local Mist sites configured.")
-    print(f"Catalogue status: {catalogue_error}")
-    print("\nInitial setup")
-    print("  1: Validate .env settings, API token, and organisation access")
-    print("  2: Download the local Mist site catalogue")
-    print("\n  0: Exit")
+# Menu rows are data, not print statements: the display, the dispatch, and the
+# "valid options" error all derive from these tables, so adding an action is a
+# single entry rather than an edit in four places.
+MenuItem = namedtuple("MenuItem", "key group label note handler")
+
+
+def build_main_menu():
+    """Build the operational menu, grouped by what each action touches."""
+    return (
+        MenuItem(
+            "1", "ALL SITES", "Find a client by MAC", "",
+            run_find_client_action,
+        ),
+        MenuItem(
+            "2", "ALL SITES", "Collect LLDP neighbours to CSV", "",
+            run_lldp_export_action,
+        ),
+        MenuItem(
+            "3", "ALL SITES", "Export every device configuration", "",
+            run_export_all_action,
+        ),
+        MenuItem(
+            "4", "ONE SWITCH", "Download a switch configuration", "",
+            run_download_config_action,
+        ),
+        MenuItem(
+            "5", "ONE SWITCH", "Export a switch's wired clients to CSV", "",
+            run_export_clients_action,
+        ),
+        MenuItem(
+            "6", "CONFIGURATION",
+            "Build upload_config.json from a source switch", "no change",
+            run_vlan_preparation_action,
+        ),
+        MenuItem(
+            PUSH_CONFIG_KEY, "CONFIGURATION",
+            "PUSH upload_config.json to a switch", "** CHANGES CONFIG **",
+            run_custom_upload_action,
+        ),
+    )
+
+
+# Groups carry the safety note when every action in them shares one; the
+# CONFIGURATION rows are annotated individually because they differ.
+GROUP_NOTES = {
+    "ALL SITES": "read-only",
+    "ONE SWITCH": "read-only",
+    "CONFIGURATION": "",
+}
+
+
+def _menu_line(indent, left, note):
+    """Left-align text and right-align its note within the menu width."""
+    line = f"{' ' * indent}{left}"
+    if not note:
+        return line
+    padding = MENU_WIDTH - len(line) - len(note)
+    return f"{line}{' ' * max(padding, 2)}{note}"
+
+
+def print_menu_header(status_lines):
+    """Print the shared title bar and the current connection status."""
+    print("\n" + "=" * MENU_WIDTH)
+    print("  Securitas Juniper Mist API Tool")
+    print("=" * MENU_WIDTH)
+    for label, value in status_lines:
+        print(f"  {label:<6}: {value}")
+
+
+def connection_status(site_summary):
+    """Describe which cloud and organisation the next action would hit."""
+    settings = read_settings()
+    api_url = settings.get("API_URL") or "not set"
+    cloud = api_url.split("://", 1)[-1].rstrip("/") if api_url != "not set" else api_url
+    return (
+        ("Cloud", cloud),
+        ("Org", settings.get("ORG_ID") or "not set"),
+        ("Sites", site_summary),
+    )
 
 
 def print_main_menu(sites):
-    """Show operational actions after the local site catalogue is available."""
-    print("\n" + "=" * 72)
-    print("Welcome to the Securitas Juniper Mist API Tool")
-    print("=" * 72)
-    print(f"Local site catalogue: {len(sites)} configured site(s)")
-    print("\nRead-only operations")
-    print("  1: Export all device configurations to outputs")
-    print("  2: Open read-only device tools")
-    print("  3: Find a client by MAC across all sites")
-    print("  4: Collect LLDP neighbours from all switches (CSV)")
-    print("\nExport configuration from a source device (no changes)")
+    """Show operational actions grouped by blast radius, most-used first."""
+    print_menu_header(connection_status(f"{len(sites)} configured site(s)"))
+    current_group = None
+    for item in build_main_menu():
+        if item.group != current_group:
+            current_group = item.group
+            print()
+            print(_menu_line(2, current_group, GROUP_NOTES.get(current_group, "")))
+        print(_menu_line(4, f"{item.key}   {item.label}", item.note))
+    print()
+    print(_menu_line(4, f"{SETUP_MENU_KEY}   Setup and diagnostics", ""))
+    print(_menu_line(4, f"{EXIT_KEY}   Exit", ""))
+
+
+def print_setup_menu(catalogue_error=None):
+    """Show setup actions, either as first-run recovery or on-demand."""
+    if catalogue_error is not None:
+        summary = "none - local catalogue unavailable"
+    else:
+        try:
+            summary = f"{len(get_sites())} configured site(s)"
+        except RuntimeError as error:
+            summary = f"unavailable ({error})"
+    print_menu_header(connection_status(summary))
+    if catalogue_error is not None:
+        print("\n  You do not currently have any local Mist sites configured.")
+        print(f"  Catalogue status: {catalogue_error}")
+    print()
+    print(_menu_line(2, "SETUP", ""))
     print(
-        "  This exports the selected configuration type to upload_config.json,"
+        _menu_line(
+            4,
+            f"{SETUP_VALIDATE_KEY}   Validate .env settings, API token, and "
+            "organisation access",
+            "",
+        )
     )
-    print("  ready for upload to another Juniper device.")
     print(
-        "  5: Collect VLAN configuration from source device and insert into "
-        "upload_config.json"
+        _menu_line(
+            4, f"{SETUP_REFRESH_KEY}   Download the local Mist site catalogue", ""
+        )
     )
-    print("\nConfiguration change")
-    print("  6: PUSH upload_config.json to destination device [DANGER]")
-    print("\n  0: Exit")
+    print()
+    back_label = "Exit" if catalogue_error is not None else "Back to the main menu"
+    print(_menu_line(4, f"{EXIT_KEY}   {back_label}", ""))
+
+
+def find_menu_item(items, choice):
+    """Match a typed key to a menu row, ignoring case and surrounding space."""
+    key = choice.strip().upper()
+    for item in items:
+        if item.key == key:
+            return item
+    return None
+
+
+def format_menu_keys(items, *extra_keys):
+    """List every accepted key for the invalid-selection message."""
+    return ", ".join([item.key for item in items] + list(extra_keys))
+
+
+def run_setup_menu(catalogue_error=None):
+    """Run setup actions. Returns False only when the operator exits the program."""
+    initial = catalogue_error is not None
+    while True:
+        print_setup_menu(catalogue_error)
+        choice = input("\nChoose a setup option: ").strip().upper()
+        if choice == EXIT_KEY:
+            if initial:
+                print("Exiting.")
+                return False
+            return True
+        if choice == SETUP_VALIDATE_KEY:
+            validate_api_configuration()
+        elif choice == SETUP_REFRESH_KEY:
+            refresh_site_catalogue()
+        else:
+            print(
+                f"Invalid selection. Enter {SETUP_VALIDATE_KEY}, "
+                f"{SETUP_REFRESH_KEY}, or {EXIT_KEY}."
+            )
+            continue
+        if initial:
+            # Let the caller re-check the catalogue before showing setup again.
+            return True
 
 
 def main():
     try:
         configure_client()
     except (RuntimeError, ValueError):
-        # Keep the menu available so option 1 can explain incomplete settings.
+        # Keep the menu available so setup can explain incomplete settings.
         pass
 
+    menu = build_main_menu()
     while True:
         try:
             sites = get_sites()
         except RuntimeError as error:
-            print_initial_setup_menu(error)
-            choice = input("\nChoose a setup option: ").strip()
-            if choice == "0":
-                print("Exiting.")
+            if not run_setup_menu(catalogue_error=error):
                 return
-            if choice == "1":
-                validate_api_configuration()
-            elif choice == "2":
-                refresh_site_catalogue()
-            else:
-                print("Invalid selection. Enter 0, 1, or 2.")
             continue
 
         print_main_menu(sites)
-        choice = input("\nChoose an option: ").strip()
-        if choice == "0":
+        choice = input("\nChoose an option: ").strip().upper()
+        if choice == EXIT_KEY:
             print("Exiting.")
             return
-        if choice == "1":
-            run_export_all_action()
-        elif choice == "2":
-            run_device_tools_action()
-        elif choice == "3":
-            run_find_client_action()
-        elif choice == "4":
-            run_lldp_export_action()
-        elif choice == "5":
-            run_vlan_preparation_action()
-        elif choice == "6":
-            run_custom_upload_action()
-        else:
-            print("Invalid selection. Enter a number from 0 to 6.")
+        if choice == SETUP_MENU_KEY:
+            run_setup_menu()
+            continue
+        item = find_menu_item(menu, choice)
+        if item is None:
+            print(
+                "Invalid selection. Valid options: "
+                f"{format_menu_keys(menu, SETUP_MENU_KEY, EXIT_KEY)}."
+            )
+            continue
+        item.handler()
+
 
 if __name__ == "__main__":
     main()

@@ -183,54 +183,71 @@ The startup menu adapts to the local site catalogue. If `site_codes.env` is miss
 or contains no valid sites, only the initial setup actions are shown:
 
 ```text
-Welcome to the Securitas Juniper Mist API Tool
+========================================================================
+  Securitas Juniper Mist API Tool
+========================================================================
+  Cloud : api.eu.mist.com
+  Org   : 00000000-0000-0000-0000-000000000000
+  Sites : none - local catalogue unavailable
 
-You do not currently have any local Mist sites configured.
+  You do not currently have any local Mist sites configured.
+  Catalogue status: site_codes.env was not found. Run get_site_ids.py to create it.
 
-Initial setup
-  1: Validate .env settings, API token, and organisation access
-  2: Download the local Mist site catalogue
+  SETUP
+    1   Validate .env settings, API token, and organisation access
+    2   Download the local Mist site catalogue
 
-  0: Exit
+    0   Exit
 ```
 
 After at least one site has been downloaded, the program switches automatically to
 the operational menu and hides the initial setup actions:
 
 ```text
-Welcome to the Securitas Juniper Mist API Tool
+========================================================================
+  Securitas Juniper Mist API Tool
+========================================================================
+  Cloud : api.eu.mist.com
+  Org   : 00000000-0000-0000-0000-000000000000
+  Sites : 42 configured site(s)
 
-Read-only operations
-  1: Export all device configurations to outputs
-  2: Open read-only device tools
-  3: Find a client by MAC across all sites
-  4: Collect LLDP neighbours from all switches (CSV)
+  ALL SITES                                                    read-only
+    1   Find a client by MAC
+    2   Collect LLDP neighbours to CSV
+    3   Export every device configuration
 
-Export configuration from a source device (no changes)
-  This exports the selected configuration type to upload_config.json,
-  ready for upload to another Juniper device.
-  5: Collect VLAN configuration from source device and insert into upload_config.json
+  ONE SWITCH                                                   read-only
+    4   Download a switch configuration
+    5   Export a switch's wired clients to CSV
 
-Configuration change
-  6: PUSH upload_config.json to destination device [DANGER]
+  CONFIGURATION
+    6   Build upload_config.json from a source switch          no change
+    P   PUSH upload_config.json to a switch         ** CHANGES CONFIG **
 
-  0: Exit
+    S   Setup and diagnostics
+    0   Exit
 ```
 
-Initial-setup option `1` checks that `.env` exists and has the required values, calls
+Options are grouped by what they touch: `ALL SITES` actions sweep the whole
+organisation, `ONE SWITCH` actions ask for a site and switch first, and
+`CONFIGURATION` holds the two upload-related actions. The status block names the
+cloud and organisation the next action would reach, so a run against the wrong
+organisation is visible before it starts.
+
+The only action that changes a switch uses the letter `P` rather than a digit, so
+no adjacent-number mistype can reach it, and adding new read-only actions never
+renumbers it. Keys are case-insensitive.
+
+Setup option `1` checks that `.env` exists and has the required values, calls
 `GET /api/v1/self` to validate the token, probes the configured organisation's site
 list, and reports whether the local catalogue is available. The token is never
-printed. Initial-setup option `2` downloads every site and replaces `site_codes.env`.
+printed. Setup option `2` downloads every site and replaces `site_codes.env`. Both
+remain available after first run through option `S`, so a token can be re-validated
+or the site list refreshed without deleting `site_codes.env`.
 
-Operational option `1` exports configurations for every device returned by each site,
-including switches, access points, and gateways/firewalls. Option `2` asks for a site
-and switch, then offers only these switch-specific read-only actions:
-
-```text
-1: Download this switch configuration
-2: Export wired clients to CSV
-0: Cancel
-```
+Option `3` exports configurations for every device returned by each site,
+including switches, access points, and gateways/firewalls. Options `4` and `5` each
+ask for a site and switch first, then act on that one switch.
 
 A single-switch configuration download is written as JSON to:
 
@@ -242,7 +259,7 @@ The `outputs` directory is created automatically. Invalid filename characters ar
 
 ## Optional configuration upload
 
-Top-level option `6` previews and applies the partial JSON object in
+Top-level option `P` previews and applies the partial JSON object in
 `upload_config.json` to one explicitly selected switch. It is intentionally separate
 from all download and preparation paths.
 
@@ -251,7 +268,7 @@ To use this feature:
 1. Copy `upload_config.example.json` to the ignored file `upload_config.json`.
 2. Ensure it contains valid JSON whose top-level value is an object.
 3. Remove a stale `upload_config.meta.json` if this is a manually managed payload.
-4. Choose option `6` and type `APPLY CUSTOM CONFIG` at the danger gate.
+4. Choose option `P` and type `APPLY CUSTOM CONFIG` at the danger gate.
 5. Select the intended site and switch carefully.
 6. Review the unified dry-run diff limited to the payload fields.
 7. Type the target switch name exactly to approve the PUT.
@@ -264,7 +281,7 @@ checks that every uploaded field matches the requested value. Both `backups/` an
 
 ## Export wired clients to CSV
 
-Read-only device-tool option `2` pulls every wired client seen on the selected
+Read-only option `5` pulls every wired client seen on the selected
 switch/stack and writes them to:
 
 ```text
@@ -282,7 +299,7 @@ Notes:
 
 ## Find a client by MAC across all sites
 
-Read-only top-level option `3` locates a wired client across the whole estate. Enter
+Read-only top-level option `1` locates a wired client across the whole estate. Enter
 a MAC in any common format — `58:05:D9:1A:85:D5`, `58-05-d9-1a-85-d5`, Cisco dotted
 `5805.d91a.85d5`, spaced, or bare `5805D91A85D5` — and the tool normalises it to the
 bare 12-hex form the Mist API expects. You are then prompted for a lookback window in
@@ -313,7 +330,7 @@ Notes:
 
 ## Collect LLDP neighbours from all switches
 
-Read-only top-level option `4` pulls the LLDP neighbours seen by **every switch at
+Read-only top-level option `2` pulls the LLDP neighbours seen by **every switch at
 every site** and writes them to a single CSV:
 
 ```text
@@ -333,18 +350,18 @@ Notes:
 
 ## Create a VLAN source dataset
 
-Top-level option `5` is a preparation workflow. It performs read-only Mist API calls
+Top-level option `6` is a preparation workflow. It performs read-only Mist API calls
 to collect one selected source switch's validated `networks` dataset and writes it to
-the ignored local file `upload_config.json`. **Option 5 does not ask for a destination,
+the ignored local file `upload_config.json`. **Option 6 does not ask for a destination,
 send a PUT, or change a Mist device.**
 
 After source selection, the tool fetches the configuration into memory, extracts and
 validates `networks`, then atomically creates or replaces `upload_config.json` in the
 form `{"networks": {...}}` without another confirmation prompt. Ignored
 `upload_config.meta.json` records the source identity and dataset hash. The destination
-is selected only after entering dangerous option `6`.
+is selected only after entering dangerous option `P`.
 
-When option `6` recognises a VLAN source dataset, it asks for the destination site and
+When option `P` recognises a VLAN source dataset, it asks for the destination site and
 switch, reads that destination's current networks, and then applies these comparison
 rules:
 
@@ -357,13 +374,13 @@ The comparison uses both the network name and `vlan_id`:
 - Case-insensitive name collisions and duplicate source VLAN IDs are conflicts and
   are skipped.
 
-Option `6` prints a summary plus an additions-only JSON diff. If there are no safe
+Option `P` prints a summary plus an additions-only JSON diff. If there are no safe
 additions, nothing is sent to Mist.
 
 Mist `PUT` semantics require special care: a nested object included in a request
 replaces that object in its entirety. Sending only the missing entries inside
 `networks` could therefore remove the destination's existing networks. The source
-dataset is never sent directly. Option `6` constructs this final API payload in memory:
+dataset is never sent directly. Option `P` constructs this final API payload in memory:
 
 ```json
 {
@@ -374,7 +391,7 @@ dataset is never sent directly. Option `6` constructs this final API payload in 
 }
 ```
 
-Option `6` verifies the dataset hash, performs a GET, and displays an additions-only
+Option `P` verifies the dataset hash, performs a GET, and displays an additions-only
 JSON preview for the selected destination without unified-diff hunk markers. It states
 how many existing networks remain unchanged, requires the exact destination switch
 name, then reads the destination
@@ -411,7 +428,7 @@ When the Mist site list changes, regenerate `site_codes.env` before opening the 
 
 The interactive utility normally uses the generated file. If the file is missing or
 empty, its initial-setup menu can query the organisation site-list endpoint and
-rebuild it with option `2`.
+rebuild it with setup option `2`.
 
 ## VS Code
 
@@ -435,7 +452,7 @@ Confirm `.env` is alongside the scripts and contains non-empty `API_URL`, `MIST_
 
 ### `site_codes.env` was not found
 
-Start `interactive_api.py` and use initial-setup option `2`, or run
+Start `interactive_api.py` and use setup option `2` (via `S`), or run
 `get_site_ids.py` directly.
 
 ### HTTP 401 or 403

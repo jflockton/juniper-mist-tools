@@ -21,6 +21,18 @@ class FakeValidationClient:
         return []
 
 
+FAKE_SETTINGS = {
+    "API_URL": "https://api.eu.mist.com",
+    "MIST_API_KEY": "token",
+    "ORG_ID": "org-uuid",
+}
+
+
+def stub_settings():
+    """Keep menu rendering independent of the developer's real .env."""
+    return patch.object(interactive_api, "read_settings", return_value=FAKE_SETTINGS)
+
+
 class MenuSafetyTests(unittest.TestCase):
     def test_read_settings_uses_current_dotenv_not_stale_process_value(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -57,32 +69,47 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("No configuration will be sent to Mist", text)
         self.assertNotIn("NON-PRODUCTION", text)
 
-    def test_main_menu_separates_read_only_and_change_operations(self):
-        with redirect_stdout(StringIO()) as output:
+    def test_main_menu_groups_actions_by_blast_radius(self):
+        with stub_settings(), redirect_stdout(StringIO()) as output:
             interactive_api.print_main_menu([{"id": "1"}])
 
         text = output.getvalue()
-        self.assertIn("Welcome to the Securitas Juniper Mist API Tool", text)
+        self.assertIn("Securitas Juniper Mist API Tool", text)
         self.assertIn("1 configured site(s)", text)
-        self.assertIn("Read-only operations", text)
-        self.assertIn("Export all device configurations to outputs", text)
-        self.assertNotIn("Export all device configurations to outputs/", text)
-        self.assertIn("Export configuration from a source device (no changes)", text)
-        self.assertIn("Configuration change", text)
-        self.assertIn(
-            "Collect VLAN configuration from source device and insert into "
-            "upload_config.json",
-            text,
-        )
-        self.assertIn("PUSH upload_config.json to destination device [DANGER]", text)
+        # Status line names the target so a wrong-org run is visible up front.
+        self.assertIn("api.eu.mist.com", text)
+        self.assertIn("org-uuid", text)
+        self.assertNotIn("token", text)
+        # Groups say what each action touches, not just that it is read-only.
+        self.assertIn("ALL SITES", text)
+        self.assertIn("ONE SWITCH", text)
+        self.assertIn("CONFIGURATION", text)
+        self.assertIn("read-only", text)
+        self.assertIn("Find a client by MAC", text)
+        self.assertIn("Export a switch's wired clients to CSV", text)
+        self.assertIn("Build upload_config.json from a source switch", text)
+        self.assertIn("no change", text)
+        # The destructive action is a letter, unreachable by a digit mistype.
+        self.assertIn("P   PUSH upload_config.json to a switch", text)
+        self.assertIn("** CHANGES CONFIG **", text)
         self.assertNotIn("NON-PRODUCTION", text)
-        self.assertIn("[DANGER]", text)
+        # Setup stays reachable once the catalogue exists.
+        self.assertIn("S   Setup and diagnostics", text)
         self.assertNotIn("Validate .env", text)
-        self.assertNotIn("Download the local Mist site catalogue", text)
 
-    def test_initial_setup_menu_hides_device_operations(self):
-        with redirect_stdout(StringIO()) as output:
-            interactive_api.print_initial_setup_menu(
+    def test_config_changing_action_cannot_be_reached_by_a_digit_mistype(self):
+        keys = [item.key for item in interactive_api.build_main_menu()]
+        self.assertIn(interactive_api.PUSH_CONFIG_KEY, keys)
+        # A letter key means no adjacent digit can reach the push by mistype,
+        # and adding read-only rows can never renumber it onto a digit.
+        self.assertFalse(interactive_api.PUSH_CONFIG_KEY.isdigit())
+        self.assertEqual(len(set(keys)), len(keys), "duplicate menu keys")
+        self.assertNotIn(interactive_api.SETUP_MENU_KEY, keys)
+        self.assertNotIn(interactive_api.EXIT_KEY, keys)
+
+    def test_setup_menu_hides_device_operations_when_catalogue_is_missing(self):
+        with stub_settings(), redirect_stdout(StringIO()) as output:
+            interactive_api.print_setup_menu(
                 "site_codes.env contains no valid site entries"
             )
 
@@ -90,12 +117,34 @@ class MenuSafetyTests(unittest.TestCase):
         self.assertIn("You do not currently have any local Mist sites configured", text)
         self.assertIn("Validate .env", text)
         self.assertIn("Download the local Mist site catalogue", text)
-        self.assertNotIn("Export all device configurations", text)
-        self.assertNotIn("Configuration change", text)
+        self.assertIn("0   Exit", text)
+        self.assertNotIn("Export every device configuration", text)
+        self.assertNotIn("CONFIGURATION", text)
+
+    def test_setup_menu_is_reachable_from_the_main_menu_and_returns(self):
+        sites = [{"id": "1", "name": "Site"}]
+        with (
+            stub_settings(),
+            patch.object(interactive_api, "configure_client"),
+            patch.object(interactive_api, "get_sites", return_value=sites),
+            patch.object(
+                interactive_api, "validate_api_configuration", return_value=True
+            ) as validate,
+            patch("builtins.input", side_effect=["s", "1", "0", "0"]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.main()
+
+        validate.assert_called_once_with()
+        text = output.getvalue()
+        # Lower case is accepted, and 0 goes back rather than quitting.
+        self.assertIn("Back to the main menu", text)
+        self.assertIn("Exiting.", text)
 
     def test_main_moves_from_initial_setup_to_operational_menu(self):
         sites = [{"id": "1", "name": "Site"}]
         with (
+            stub_settings(),
             patch.object(interactive_api, "configure_client"),
             patch.object(
                 interactive_api,
@@ -112,31 +161,37 @@ class MenuSafetyTests(unittest.TestCase):
 
         refresh.assert_called_once_with()
         text = output.getvalue()
-        self.assertIn("Initial setup", text)
+        self.assertIn("SETUP", text)
         self.assertIn("1 configured site(s)", text)
 
-    def test_main_uses_renumbered_operational_actions(self):
+    def test_main_dispatches_the_first_option_to_the_mac_finder(self):
         sites = [{"id": "1", "name": "Site"}]
         with (
+            stub_settings(),
             patch.object(interactive_api, "configure_client"),
             patch.object(interactive_api, "get_sites", return_value=sites),
-            patch.object(interactive_api, "run_export_all_action") as export_all,
+            patch.object(interactive_api, "run_find_client_action") as finder,
             patch("builtins.input", side_effect=["1", "0"]),
             redirect_stdout(StringIO()),
         ):
             interactive_api.main()
 
-        export_all.assert_called_once_with()
+        finder.assert_called_once_with()
 
-    def test_operational_menu_dispatch_after_adding_mac_finder(self):
+    def test_operational_menu_dispatch_covers_every_row(self):
         sites = [{"id": "1", "name": "Site"}]
         for choice, target in (
-            ("3", "run_find_client_action"),
-            ("4", "run_lldp_export_action"),
-            ("5", "run_vlan_preparation_action"),
-            ("6", "run_custom_upload_action"),
+            ("1", "run_find_client_action"),
+            ("2", "run_lldp_export_action"),
+            ("3", "run_export_all_action"),
+            ("4", "run_download_config_action"),
+            ("5", "run_export_clients_action"),
+            ("6", "run_vlan_preparation_action"),
+            ("p", "run_custom_upload_action"),
+            ("P", "run_custom_upload_action"),
         ):
             with (
+                stub_settings(),
                 patch.object(interactive_api, "configure_client"),
                 patch.object(interactive_api, "get_sites", return_value=sites),
                 patch.object(interactive_api, target) as action,
@@ -146,6 +201,19 @@ class MenuSafetyTests(unittest.TestCase):
                 interactive_api.main()
             action.assert_called_once_with()
 
+    def test_invalid_selection_lists_the_keys_from_the_menu_table(self):
+        sites = [{"id": "1", "name": "Site"}]
+        with (
+            stub_settings(),
+            patch.object(interactive_api, "configure_client"),
+            patch.object(interactive_api, "get_sites", return_value=sites),
+            patch("builtins.input", side_effect=["9", "0"]),
+            redirect_stdout(StringIO()) as output,
+        ):
+            interactive_api.main()
+
+        text = output.getvalue()
+        self.assertIn("Invalid selection. Valid options: 1, 2, 3, 4, 5, 6, P, S, 0", text)
     def test_find_client_action_is_read_only_and_has_no_danger_gate(self):
         with (
             patch.object(interactive_api, "ensure_client", return_value=object()),
